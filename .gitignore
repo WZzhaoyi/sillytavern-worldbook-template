@@ -1,0 +1,61 @@
+# 输出文件（脚本生成，不纳入版本控制）
+output/*.json
+output/*.md
+!output/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+venv/
+.venv/
+env/
+
+# Node / Web
+node_modules/
+.next/
+.nuxt/
+.output/
+.cache/
+bower_components/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+*.min.js
+*.min.css
+*.bundle.js
+*.chunk.js
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 敏感文件
+.env
+.env.*
+*.key
+*.secret
+
+# 临时 / 日志
+*.tmp
+*.bak
+*.log
+logs/
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3

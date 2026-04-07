@@ -1,0 +1,13 @@
+# 统一换行符
+* text=auto eol=lf
+
+# 中文文本文件确保正确处理
+*.txt text
+*.md text
+*.json linguist-language=jsonc
+
+# Python
+*.py text diff=python
+
+# 原著文本标记为大文件（启用LFS后取消注释）
+# literature/original/*.txt filter=lfs diff=lfs merge=lfs -text
