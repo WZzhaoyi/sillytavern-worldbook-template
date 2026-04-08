@@ -8,6 +8,7 @@ SillyTavern 世界书和角色卡生成器
 import json
 import os
 import re
+import sys
 import yaml
 from pathlib import Path
 from typing import Dict, List, Any
@@ -548,6 +549,7 @@ def main():
         print(f"[Error] {e}")
         import traceback
         traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
