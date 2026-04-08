@@ -42,11 +42,11 @@ class SillyTavernGenerator:
         self.project_root = Path(project_root)
         self.config = ConfigLoader.load_config(self.project_root)
 
+        paths = self.config.get('paths', {})
         char_gen = self.config.get('character_generation', {})
         self.characters_dir = self.project_root / char_gen.get('output_dir', 'literature/characters')
-        self.fanfic_dir = self.project_root / 'literature' / 'fanfic'
-        self.scenarios_dir = self.project_root / 'literature' / 'scenarios'
-        self.output_dir = self.project_root / 'output'
+        self.scenarios_dir = self.project_root / paths.get('scenarios_dir', 'literature/scenarios')
+        self.output_dir = self.project_root / paths.get('output_dir', 'output')
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.dimensions = self.config.get('dimensions', [])
@@ -60,7 +60,7 @@ class SillyTavernGenerator:
             'position': 0, 'constant': False, 'selective': True, 'ignore_budget': True
         })
 
-    def merge_character_files(self, char_name: str) -> str:
+    def merge_character_files(self, char_name: str, entry_type: str = "protagonist") -> str:
         md_file = self.characters_dir / f"{char_name}.md"
         stages_file = self.characters_dir / f"{char_name}_stages.json"
 
@@ -76,7 +76,7 @@ class SillyTavernGenerator:
             with open(stages_file, 'r', encoding='utf-8') as f:
                 stages_content = f.read()
 
-        return f"""<character name="{char_name}" type="protagonist">
+        return f"""<character name="{char_name}" type="{entry_type}">
 {md_content}
 
 <character_states>
@@ -97,7 +97,7 @@ class SillyTavernGenerator:
         type_config = self.get_entry_type_config(entry_type)
         defaults = self.silly_defaults.get('entry', {})
 
-        content = self.merge_character_files(char_name)
+        content = self.merge_character_files(char_name, entry_type)
         keys = [char_name]
         md_path = self.characters_dir / f"{char_name}.md"
         if md_path.exists():
@@ -136,12 +136,22 @@ class SillyTavernGenerator:
             "preventRecursion": defaults.get('prevent_recursion', False)
         }
 
+    def _collect_dedicated_source_files(self) -> set:
+        """Collect source_file paths from entry_types that have dedicated parsers."""
+        dedicated = set()
+        for et_config in self.entry_types.values():
+            sf = et_config.get('source_file')
+            if sf:
+                dedicated.add((self.project_root / sf).resolve())
+        return dedicated
+
     def extract_setting_entries(self, start_id: int) -> List[Dict[str, Any]]:
         entries = []
         type_config = self.get_entry_type_config('setting')
         defaults = self.silly_defaults.get('entry', {})
 
-        source_files = self.config.get('character_generation', {}).get('source_files', ['literature/fanfic/*.txt'])
+        source_files = self.config.get('character_generation', {}).get('source_files', [])
+        dedicated_files = self._collect_dedicated_source_files()
 
         for source_pattern in source_files:
             source_dir = self.project_root / Path(source_pattern).parent
@@ -151,7 +161,7 @@ class SillyTavernGenerator:
                 continue
 
             for settings_file in source_dir.glob(source_glob):
-                if settings_file.name in ("关系网.txt", "视角切换.txt"):
+                if settings_file.resolve() in dedicated_files:
                     continue
                 with open(settings_file, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -196,7 +206,7 @@ class SillyTavernGenerator:
                         "delay": defaults.get('delay', 0),
                         "cooldown": defaults.get('cooldown', 0),
                         "sticky": defaults.get('sticky', 0),
-                        "scanDepth": 6,
+                        "scanDepth": defaults.get('scan_depth', 2),
                         "vectorized": defaults.get('vectorized', False),
                         "ignoreBudget": type_config.get('ignore_budget', True),
                         "excludeRecursion": defaults.get('exclude_recursion', False),
@@ -209,7 +219,10 @@ class SillyTavernGenerator:
         type_config = self.get_entry_type_config('pov')
         defaults = self.silly_defaults.get('entry', {})
 
-        source_file = self.project_root / type_config.get('source_file', 'literature/fanfic/视角切换.txt')
+        source_path = type_config.get('source_file')
+        if not source_path:
+            return []
+        source_file = self.project_root / source_path
         if not source_file.exists():
             return []
 
@@ -276,7 +289,10 @@ class SillyTavernGenerator:
         type_config = self.get_entry_type_config('relationship')
         defaults = self.silly_defaults.get('entry', {})
 
-        relationship_file = self.fanfic_dir / "关系网.txt"
+        source_file = type_config.get('source_file')
+        if not source_file:
+            return []
+        relationship_file = self.project_root / source_file
         if not relationship_file.exists():
             return []
 
@@ -327,16 +343,22 @@ class SillyTavernGenerator:
         return entries
 
     def extract_example_dialogue(self) -> str:
-        example_file = self.fanfic_dir / "示例对话.txt"
+        narrator = self.config.get('narrator', {})
+        example_path = narrator.get('example_dialogue_file')
+        if not example_path:
+            return ""
+        example_file = self.project_root / example_path
         if not example_file.exists():
             return ""
+
+        max_length = narrator.get('example_dialogue_max_length', 4000)
 
         with open(example_file, 'r', encoding='utf-8') as f:
             content = f.read()
 
         lines = content.split('\n')
         cleaned_lines = [line.strip() for line in lines if line.strip()]
-        return '\n'.join(cleaned_lines)[:4000]
+        return '\n'.join(cleaned_lines)[:max_length]
 
     def parse_scenario_file(self, file_path: Path) -> str:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -427,16 +449,16 @@ class SillyTavernGenerator:
         data = {
             "name": narrator.get('name', '叙事者'),
             "description": narrator.get('description', ''),
-            "personality": "叙述成人情节、擅长角色言行和场景刻画",
+            "personality": narrator.get('personality', ''),
             "scenario": narrator.get('world_scenario', ''),
             "first_mes": first_mes,
             "alternate_greetings": alternate_greetings,
             "mes_example": self.extract_example_dialogue(),
-            "creator_notes": f"叙事者角色。状态维度：{', '.join(dim_names)}",
+            "creator_notes": narrator.get('creator_notes', f"状态维度：{', '.join(dim_names)}"),
             "system_prompt": narrator.get('persona', ''),
             "post_history_instructions": post_history,
             "tags": project.get('tags', []),
-            "creator": "SillyTavern Generator",
+            "creator": narrator.get('creator', ''),
             "character_version": project.get('version', '1.0.0'),
             "extensions": {
                 "created_at": datetime.now().isoformat(),

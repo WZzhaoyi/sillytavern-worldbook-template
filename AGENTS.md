@@ -180,6 +180,13 @@ dimensions:
   # 可按需增减维度，每个维度的 stages数量 = ranges长度 - 1
 
 # =============================================================================
+# 路径配置
+# =============================================================================
+paths:
+  scenarios_dir: "literature/scenarios"
+  output_dir: "output"
+
+# =============================================================================
 # 角色生成配置（Agent使用）
 # =============================================================================
 character_generation:
@@ -260,6 +267,7 @@ entry_types:
     constant: false
     selective: true
     ignore_budget: true
+    source_file: "literature/fanfic/关系网.txt"
 
 # =============================================================================
 # SillyTavern字段默认值
@@ -290,6 +298,10 @@ sillytavern_defaults:
 narrator:
   name: "{作品名}"
   description: "《{作品名}》的叙事者。"
+  personality: "{叙事者的性格特征，如：擅长角色言行和场景刻画}"
+  creator: "{创作者名称}"
+  example_dialogue_file: "literature/fanfic/示例对话.txt"
+  example_dialogue_max_length: 4000
   persona: >
     你是《{作品名}》的叙事者。
 
