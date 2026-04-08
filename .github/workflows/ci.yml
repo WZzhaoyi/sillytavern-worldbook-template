@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - 'AGENTS.md'
+      - 'scripts/**'
+      - 'requirements.txt'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'AGENTS.md'
+      - 'scripts/**'
+      - 'requirements.txt'
+      - '.github/workflows/ci.yml'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run generation script
+        run: python scripts/generate_sillytavern.py
+
+      - name: Verify outputs
+        run: |
+          for f in "output/{作品名}世界书.json" "output/{作品名}叙事者.json" "output/使用指南.md"; do
+            [ -s "$f" ] || { echo "FAIL: $f missing or empty"; exit 1; }
+          done
+          python -c "import json; json.load(open('output/{作品名}世界书.json', encoding='utf-8'))"
+          python -c "import json; json.load(open('output/{作品名}叙事者.json', encoding='utf-8'))"
