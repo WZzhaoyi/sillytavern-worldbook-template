@@ -444,17 +444,30 @@ class SillyTavernGenerator:
 
         dim_names = [d['name'] for d in self.dimensions]
 
-        state_instructions = narrator.get('state_instructions', '')
-        post_history = state_instructions.strip() if state_instructions else ""
+        style_instructions = narrator.get('style_instructions', '').strip()
+        state_instructions = narrator.get('state_instructions', '').strip()
+        post_history_parts = [p for p in [style_instructions, state_instructions] if p]
+        post_history = '\n\n'.join(post_history_parts)
+
+        style_samples = self.extract_example_dialogue()
+        base_description = narrator.get('description', '')
+        if style_samples:
+            description = (
+                "以下是本作的文风参考段落，续写时应严格模仿其叙事风格、"
+                "句式和用词习惯：\n\n---\n\n"
+                f"{style_samples}\n\n---\n\n{base_description}"
+            )
+        else:
+            description = base_description
 
         data = {
             "name": narrator.get('name', '叙事者'),
-            "description": narrator.get('description', ''),
+            "description": description,
             "personality": narrator.get('personality', ''),
             "scenario": narrator.get('world_scenario', ''),
             "first_mes": first_mes,
             "alternate_greetings": alternate_greetings,
-            "mes_example": self.extract_example_dialogue(),
+            "mes_example": "",
             "creator_notes": narrator.get('creator_notes', f"状态维度：{', '.join(dim_names)}"),
             "system_prompt": narrator.get('persona', ''),
             "post_history_instructions": post_history,

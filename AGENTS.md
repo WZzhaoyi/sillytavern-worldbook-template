@@ -1,6 +1,6 @@
 # SillyTavern 同人小说世生成系统
 
-> **Version**: 1.1.0  
+> **Version**: 1.2.0  
 > **Purpose**: 基于角色状态系统，自动生成SillyTavern兼容的世界书和叙事者角色卡
 
 ---
@@ -294,6 +294,16 @@ sillytavern_defaults:
 # =============================================================================
 # 叙事者配置（用于生成角色卡）
 # 以下为模板，请根据作品替换内容
+#
+# 【字段与 SillyTavern 卡片的映射及用途】
+#   description + example_dialogue_file → data.description
+#     风格锚点主阵地：永驻上下文，放原作风格样本段落
+#   persona → data.system_prompt
+#     角色核心设定与叙事原则
+#   style_instructions → data.post_history_instructions 前半部分
+#     简明风格执行指令：将风格翻译为具体可执行的写作约束
+#   state_instructions → data.post_history_instructions 后半部分
+#     状态系统规则：变量计算与输出格式
 # =============================================================================
 narrator:
   name: "{作品名}"
@@ -302,6 +312,12 @@ narrator:
   creator: "{创作者名称}"
   example_dialogue_file: "literature/fanfic/示例对话.txt"
   example_dialogue_max_length: 4000
+  style_instructions: |
+    模仿上文提供的风格参考段落。根据以下指导叙述：
+    - {具体特征1，如：第一人称限制视角，紧贴主角内心}
+    - {具体特征2，如：短句为主，动作描写干练不加修饰}
+    - {具体特征3，如：对话不加"他说/她说"，直接用破折号引出}
+    避免：解释性叙述、否定性词组、总结性段落。
   persona: >
     你是《{作品名}》的叙事者。
 
@@ -628,10 +644,7 @@ variables:
 
 **Step 6: 创建示例对话文件（可选）**
 创建文件：literature/fanfic/示例对话.txt
-
-<START>
-{{user}}: 场景描述
-{{char}}: 叙事回应
+直接摘录原文段落，段落间用空行分隔。
 
 **Step 7: 验证**
 检查所有文件是否符合格式规范，目录结构是否正确。
@@ -657,24 +670,22 @@ variables:
 {在场景中的动态表现}
 ```
 
-#### 模板E：从原著提取示例对话
+#### 模板E：创建风格样本文件
 
 ```markdown
-请从原著文本中提取示例对话：
+请从原著/参考文本中提取风格样本：
 
 **原著文件**：literature/original/{文件名}
-**作品风格**：{如"古风权谋"、"现代都市"等}
-**所需场景**：
-1. {场景1描述}
-2. {场景2描述}
+**提取要求**：选取2-3段最能体现以下维度的段落：
+1. 叙事节奏（句式长短、段落节奏）
+2. 对话风格（对话与叙述的比例、对话引出方式）
+3. 描写手法（环境/心理/动作描写的特征）
 
 **输出要求**：
-生成/追加到文件：literature/fanfic/示例对话.txt
+生成文件：literature/fanfic/示例对话.txt（或 example_dialogue_file 配置的路径）
 
-格式：
-<START>
-{{user}}: [场景描述]
-{{char}}: [从原文提取的对应叙述内容]
+格式：直接摘录原文段落，段落间用空行分隔。
+总长度建议控制在 1500 字以内。
 ```
 
 #### 模板F：生成场景剧本
