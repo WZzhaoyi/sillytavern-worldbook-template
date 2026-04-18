@@ -151,7 +151,7 @@ class SillyTavernGenerator:
         type_config = self.get_entry_type_config('setting')
         defaults = self.silly_defaults.get('entry', {})
 
-        source_files = self.config.get('character_generation', {}).get('source_files', [])
+        source_files = type_config.get('source_files', [])
         dedicated_files = self._collect_dedicated_source_files()
 
         for source_pattern in source_files:
