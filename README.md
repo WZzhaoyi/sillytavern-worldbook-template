@@ -24,6 +24,27 @@ pip install -r requirements.txt
    ```
 5. 将 `output/` 下生成的 JSON 文件导入 SillyTavern
 
+### 启用角色状态管理（推荐）
+
+`_stages.json` 仅声明状态结构——要让变量**自动计算**与**阶段内容按区间裁剪**真正生效，需要在 SillyTavern 内安装运行时：
+
+1. **安装 JS-Slash-Runner 扩展**
+   - 在 SillyTavern「扩展」→「安装扩展」中填入：
+     ```
+     https://github.com/n0vi028/JS-Slash-Runner
+     ```
+   - 安装后启用扩展。
+
+2. **导入角色状态管理脚本**
+   - 打开 JS-Slash-Runner 扩展面板 →「脚本管理」→「新建脚本」
+   - 脚本内容填入（仅此一行）：
+     ```javascript
+     import 'https://testingcf.jsdelivr.net/gh/WZzhaoyi/tavern_helper/dist/角色状态管理/index.js'
+     ```
+   - 保存并启用该脚本。
+
+启用后，LLM 回复末尾输出的 `_.set(...)` 指令会被自动执行，`<character_states>` 块内的阶段内容会依据当前数值动态裁剪注入。未安装扩展时，世界书和角色卡仍可正常使用，但状态数值和阶段切换需手动维护。
+
 ## 项目结构
 
 ```
