@@ -138,20 +138,15 @@ paths:
 # 角色生成配置（Agent使用）
 # =============================================================================
 character_generation:
-  # 素材搜索路径（glob模式）
-  source_files:
-    - "literature/original/*.txt"
-    - "literature/fanfic/*.txt"
+  # 角色档案输出目录（脚本从此目录扫描 .md 和 _stages.json）
+  output_dir: "literature/characters"
   
-  # 提取规则（正则表达式，按需修改）
+  # Agent提取参考（正则表达式，仅供Agent生成角色档案时参考，脚本不使用）
   extract_patterns:
     aliases: '【名称】\s*{name}[\(（]([^\)）]+)[\)）]'
     appearance: '(?:容貌|外貌|相貌|容颜)[：:](.*?)(?=\n\n|\n【|$)'
     personality: '(?:性格|性情)[：:](.*?)(?=\n\n|\n【|$)'
     relationships: '(?:与.+?的关系|情感)[：:](.*?)(?=\n\n|\n【|$)'
-  
-  # 生成文件位置
-  output_dir: "literature/characters"
 
 # =============================================================================
 # 输出配置
@@ -180,6 +175,8 @@ entry_types:
     ignore_budget: true
   
   # 设定条目（世界观、剧情指导等）
+  # source_files: 设定文件扫描路径（glob模式），文件内必须为【标题】(关键词) 格式
+  # 不要包含原著正文路径（会被当作设定条目错误解析）
   setting:
     prefix: ""
     order_start: 50
@@ -189,6 +186,8 @@ entry_types:
     constant: false
     selective: false
     ignore_budget: true
+    source_files:
+      - "literature/fanfic/*.txt"
 
   # 视角条目（互斥组，同时只激活一个）
   pov:
@@ -523,6 +522,8 @@ narrator:
 
 **目标**：创建续写起点。脚本将第一个场景作为 first_mes，其余作为 alternate_greetings。
 
+> ⚠️ 正文将作为 first_mes，LLM 视其为「作者示范」，决定后续回复的视角、句式、长度。目标 **500-900字**，过短锚定不足，过长拖累节奏。
+
 **输出**：`literature/scenarios/{序号}_{场景名}.md`
 
 **指令模板**：
@@ -530,14 +531,22 @@ narrator:
 ```markdown
 请为【{场景名}】生成场景剧本。
 
-**参考**：章节概述（选取关键转折点）、角色档案、设定总集
-
+**参考**：章节概述、原著文本、角色档案、设定总集
 **输出文件**：literature/scenarios/{序号}_{场景名}.md
+
+**正文要求**：
+- 字数 500-900
+- 有原著：摘录对应段落为主干（≥70%），轻度衔接改写
+- 无原著：遵循 literature/fanfic/示例对话.txt 的风格
+- 结构：场景切入 → 角色动作/对话 → 收束于待回应的钩子
+- 禁止：大段背景交代、上帝视角总结、超出场景的剧透
+
+**variables**：列出在场角色各维度数值，需与角色弧线位置一致。
 
 **格式**：
 ---
 name: 场景名称
-description: 场景描述
+description: 一句话描述
 variables:
   {角色A}: {维度1: 20, 维度2: 15}
   {角色B}: {维度1: 25, 维度2: 30}
