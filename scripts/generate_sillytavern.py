@@ -167,12 +167,13 @@ class SillyTavernGenerator:
                 with open(settings_file, 'r', encoding='utf-8') as f:
                     content = f.read()
 
-                header_pattern = r'【([^】]+)】(?:[（(]([^）)]+)[）)])?'
+                header_pattern = r'(★?)【([^】]+)】(?:[（(]([^）)]+)[）)])?'
                 headers = list(re.finditer(header_pattern, content))
 
                 for idx, match in enumerate(headers):
-                    name = match.group(1).strip()
-                    keywords_text = match.group(2)
+                    is_constant = bool(match.group(1))
+                    name = match.group(2).strip()
+                    keywords_text = match.group(3)
 
                     if not name:
                         continue
@@ -194,8 +195,8 @@ class SillyTavernGenerator:
                         "keysecondary": [],
                         "comment": f"{type_config.get('prefix', '')}{name}",
                         "content": f"### {name}\n\n{setting_content}",
-                        "constant": type_config.get('constant', False),
-                        "selective": type_config.get('selective', True),
+                        "constant": is_constant or type_config.get('constant', False),
+                        "selective": (not is_constant) and type_config.get('selective', True),
                         "selectiveLogic": defaults.get('selective_logic', 0),
                         "addMemo": defaults.get('add_memo', True),
                         "order": order,
@@ -464,7 +465,7 @@ class SillyTavernGenerator:
             "name": narrator.get('name', '叙事者'),
             "description": description,
             "personality": narrator.get('personality', ''),
-            "scenario": narrator.get('world_scenario', ''),
+            "scenario": "",
             "first_mes": first_mes,
             "alternate_greetings": alternate_greetings,
             "mes_example": "",
