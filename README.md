@@ -13,9 +13,23 @@
 pip install -r requirements.txt
 ```
 
+### 初始化项目（四选一）
+
+1. **Use this template**（推荐）——GitHub仓库主页点击「Use this template」→「Create a new repository」，基于当前主分支生成**全新独立仓库**。
+2. **Release 源码归档**——在 [Releases](../../releases) 页下载对应版本的 `Source code (zip/tar.gz)`，解压即得。
+3. **`degit`**（CLI 用户）：
+   ```bash
+   npx degit WZzhaoyi/sillytavern-worldbook-template my-project
+   ```
+   一行命令拉取最新主分支快照，无 git 历史。
+4. **`git clone`**（持续开发）：
+   ```bash
+   git clone https://github.com/WZzhaoyi/sillytavern-worldbook-template.git my-project
+   ```
+
 ### 使用步骤
 
-1. 克隆本仓库
+1. 用上述任一方式建立项目，开启 AGENTS 对话
 2. 编辑 `AGENTS.md` 第 2 节配置区，填入你的作品信息
 3. 在 `literature/` 下创建角色档案、场景剧本等素材文件
 4. 运行生成脚本：
