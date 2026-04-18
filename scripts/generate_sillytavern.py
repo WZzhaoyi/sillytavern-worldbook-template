@@ -27,15 +27,52 @@ class ConfigLoader:
         with open(agents_file, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        pattern = r'##\s*2\.\s*配置区.*?(```yaml\s*\n(.*?)```)\s*(?:---\s*)?##\s*3\.'
-        match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
+        pattern = r'##\s*2\.\s*配置区.*?^(```yaml\s*\n(.*?)^```)\s*(?:---\s*)?##\s*3\.'
+        match = re.search(pattern, content, re.DOTALL | re.IGNORECASE | re.MULTILINE)
         if not match:
             raise ValueError("Cannot extract config from AGENTS.md")
 
+        yaml_text = match.group(2)
+        yaml_start_line = content[:match.start(2)].count('\n') + 1
+
         try:
-            return yaml.safe_load(match.group(2))
+            return yaml.safe_load(yaml_text)
         except yaml.YAMLError as e:
-            raise ValueError(f"YAML parse error: {e}")
+            raise ValueError(ConfigLoader._format_yaml_error(e, yaml_text, yaml_start_line))
+
+    @staticmethod
+    def _format_yaml_error(err: yaml.YAMLError, yaml_text: str, yaml_start_line: int) -> str:
+        header = "YAML 解析失败——AGENTS.md 第 2 节配置区格式错误"
+        problem = getattr(err, 'problem', None) or str(err)
+        mark = getattr(err, 'problem_mark', None) or getattr(err, 'context_mark', None)
+
+        if mark is None:
+            return f"{header}\n  原因: {problem}\n  提示: 请对照 AGENTS.md 第 2 节「🔒 LLM 修改守则」逐条检查。"
+
+        rel_line = mark.line
+        col = mark.column
+        abs_line = yaml_start_line + rel_line
+
+        lines = yaml_text.split('\n')
+        start = max(0, rel_line - 3)
+        end = min(len(lines), rel_line + 4)
+        width = len(str(yaml_start_line + end))
+
+        ctx_lines = []
+        for i in range(start, end):
+            marker = '>>' if i == rel_line else '  '
+            ctx_lines.append(f"    {marker} {str(yaml_start_line + i).rjust(width)} | {lines[i]}")
+            if i == rel_line:
+                ctx_lines.append(f"    {'  '} {' ' * width} | {' ' * col}^")
+
+        context = '\n'.join(ctx_lines)
+        return (
+            f"{header}\n"
+            f"  位置: AGENTS.md 第 {abs_line} 行，第 {col + 1} 列\n"
+            f"  原因: {problem}\n"
+            f"  上下文:\n{context}\n"
+            f"  提示: 请对照 AGENTS.md 第 2 节「🔒 LLM 修改守则」逐条检查（缩进、冒号后空格、stages/ranges 长度等）。"
+        )
 
 
 class SillyTavernGenerator:
