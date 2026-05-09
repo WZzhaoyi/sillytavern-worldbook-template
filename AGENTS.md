@@ -40,9 +40,9 @@ project/
 ├── literature/
 │   ├── characters/           # 角色资产目录
 │   │   ├── {角色A}.md
-│   │   ├── {角色A}_stages.json
+│   │   ├── {角色A}_stages.{json|yaml}
 │   │   ├── {角色B}.md
-│   │   └── {角色B}_stages.json
+│   │   └── {角色B}_stages.{json|yaml}
 │   ├── scenarios/            # 场景剧本目录
 │   │   └── {场景}.md         # 含YAML Frontmatter变量配置
 │   ├── fanfic/               # 原始素材目录
@@ -64,7 +64,7 @@ project/
 |---------|---------|------|
 | 章节概述 | `章节概述.md` | `章节概述.md` |
 | 角色基础档案 | `{角色名}.md` | `张三.md` |
-| 角色阶段数据 | `{角色名}_stages.json` | `张三_stages.json` |
+| 角色阶段数据 | `{角色名}_stages.{json\|yaml}` | `张三_stages.json` 或 `张三_stages.yaml` |
 | 场景剧本 | `{序号}_{场景名}.md` 或 `{场景名}.md` | `01_initial.md` |
 | 设定文件 | 任意 `.txt` | `设定总集.txt` |
 
@@ -157,8 +157,11 @@ paths:
 # 角色生成配置（Agent使用）
 # =============================================================================
 character_generation:
-  # 角色档案输出目录（脚本从此目录扫描 .md 和 _stages.json）
+  # 角色档案输出目录（脚本从此目录扫描 .md 和 _stages.{format}）
   output_dir: "literature/characters"
+  
+  # 阶段数据文件格式："json" 或 "yaml"（选定后统一使用，不可混用）
+  stages_format: "json"
   
   # Agent提取参考（正则表达式，仅供Agent生成角色档案时参考，脚本不使用）
   extract_patterns:
@@ -383,6 +386,7 @@ narrator:
    - 描写风格偏好（文风、场景、对话）
    - 叙事原则（主线/暗线安排、节奏、伏笔）
    - 状态维度的语义（主角要追踪什么变化）
+   - **阶段数据文件格式**：JSON 或 YAML（选定后统一使用，不可混用）
 3. 编辑 AGENTS.md 第2节配置区：
    - `project.name` → 作品名
    - `dimensions` → 状态维度定义
@@ -476,11 +480,11 @@ narrator:
 
 ### Step 5: 角色档案
 
-**目标**：为每个角色生成基础档案（.md）和阶段数据（_stages.json）。
+**目标**：为每个角色生成基础档案（.md）和阶段数据（_stages.{json|yaml}）。
 
 **输出**：
 - `literature/characters/{角色名}.md`
-- `literature/characters/{角色名}_stages.json`
+- `literature/characters/{角色名}_stages.{json|yaml}`（格式由 `character_generation.stages_format` 配置决定）
 
 有原著时，按以下流程提取：
 
@@ -515,12 +519,12 @@ narrator:
 
 **输出**：
 1. literature/characters/{角色名}.md（格式参考附录A）
-2. literature/characters/{角色名}_stages.json（格式参考附录B）
+2. literature/characters/{角色名}_stages.json 或 .yaml（格式参考附录B，由配置决定）
 
 **要求**：
 - .md 使用极简键值对格式，不加粗、无列表符号
 - **外貌 / 台词风格 / 称呼习惯**：优先以 「」 引用原文短语（短句/词组，单条不超过20字），保留原著用词与语气；禁止用抽象形容词直接替代原文（如「冷淡疏离」应替换为 「"哼，不值一提"」）
-- _stages.json 使用标准JSON
+- _stages.json 使用标准JSON 或 _stages.yaml 使用标准YAML（按配置选定，不可混用）
 - 阶段内容基于角色在原著中的实际变化轨迹撰写，关键行为尽量原文引证
 - 无法确定的信息标注为"未明确"
 ```
@@ -590,7 +594,7 @@ variables:
 
 **操作**：
 1. 读取 literature/characters/{角色名}.md
-2. 读取 literature/characters/{角色名}_stages.json
+2. 读取 literature/characters/{角色名}_stages.{json|yaml}
 3. 执行修改并保存
 ```
 
@@ -600,7 +604,7 @@ variables:
 - [ ] 角色设定是否符合原著/同人基调
 - [ ] 各维度阶段描述是否呈现梯度变化
 - [ ] 阶段内容是否体现角色个性（非通用模板）
-- [ ] JSON格式是否正确
+- [ ] JSON/YAML格式是否正确（按配置选定，不可混用）
 - [ ] XML标签是否正确闭合
 
 ---
@@ -658,7 +662,7 @@ dimensions:
       - "阶段1"    # 0-25
 ```
 
-所有已生成的`_stages.json`需要更新以包含新维度。
+所有已生成的`_stages.{json|yaml}`需要更新以包含新维度。
 
 ### 5.2 调整阶段范围
 
@@ -736,7 +740,9 @@ MBTI: INFJ（提倡者）
 备注: 未明确
 ```
 
-### B. 示例：阶段数据（_stages.json）
+### B. 示例：阶段数据（_stages.json 或 _stages.yaml）
+
+**JSON 格式**（`stages_format: "json"`）：
 
 ```json
 {
@@ -767,6 +773,37 @@ MBTI: INFJ（提倡者）
 }
 ```
 
+**YAML 格式**（`stages_format: "yaml"`）：
+
+```yaml
+name: character_states
+characters:
+  - name: 示例角色
+    states:
+      - name: 维度一
+        ranges:
+          - min: 0
+            max: 30
+            content: "**典型行为**: 冷漠抗拒。**心理活动**: 内心羞耻"
+          - min: 31
+            max: 70
+            content: "**典型行为**: 开始配合但保持距离。**心理活动**: 自我说服"
+          - min: 71
+            max: 100
+            content: "**典型行为**: 主动靠近。**关键目标**: 证明自身价值"
+      - name: 维度二
+        ranges:
+          - min: 0
+            max: 30
+            content: "**行为描写**: 身体僵硬，本能抗拒"
+          - min: 31
+            max: 70
+            content: "**行为描写**: 开始响应，但表情冷淡"
+          - min: 71
+            max: 100
+            content: "**行为描写**: 完全开放。**关键状态**: 形成独特行为模式"
+```
+
 ### C. 常见错误排查
 
 | 错误 | 原因 | 解决 |
@@ -774,6 +811,7 @@ MBTI: INFJ（提倡者）
 | YAML解析失败 | 配置区格式错误 | 检查缩进、冒号后空格、引号匹配 |
 | 找不到角色文件 | 目录路径错误 | 检查`character_generation.output_dir` |
 | JSON格式错误 | `_stages.json`语法问题 | 使用在线JSON校验器检查 |
+| YAML格式错误 | `_stages.yaml`语法问题 | 检查缩进、冒号后空格 |
 | 世界书导入失败 | JSON结构错误 | 检查`entry_types`配置是否完整 |
 | 角色卡无响应 | system_prompt格式问题 | 检查`narrator.persona`换行符 |
 
