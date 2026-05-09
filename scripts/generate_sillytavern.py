@@ -91,6 +91,11 @@ class SillyTavernGenerator:
         self.entry_types = self.config.get('entry_types', {})
         self.silly_defaults = self.config.get('sillytavern_defaults', {})
         self.narrator_config = self.config.get('narrator', {})
+        
+        # 阶段数据文件格式：json 或 yaml（选定后统一使用，不可混用）
+        self.stages_format = char_gen.get('stages_format', 'json')
+        if self.stages_format not in ('json', 'yaml'):
+            raise ValueError(f"character_generation.stages_format must be 'json' or 'yaml', got: '{self.stages_format}'")
 
     def get_entry_type_config(self, entry_type: str) -> Dict[str, Any]:
         return self.entry_types.get(entry_type, {
@@ -100,7 +105,7 @@ class SillyTavernGenerator:
 
     def merge_character_files(self, char_name: str, entry_type: str = "protagonist") -> str:
         md_file = self.characters_dir / f"{char_name}.md"
-        stages_file = self.characters_dir / f"{char_name}_stages.json"
+        stages_file = self.characters_dir / f"{char_name}_stages.{self.stages_format}"
 
         if not md_file.exists():
             print(f"Warning: {md_file} not found")
@@ -112,7 +117,12 @@ class SillyTavernGenerator:
         stages_content = "{}"
         if stages_file.exists():
             with open(stages_file, 'r', encoding='utf-8') as f:
-                stages_content = f.read()
+                raw = f.read()
+                # YAML 格式需转换为 JSON 供 <character_states> 使用
+                if self.stages_format == 'yaml':
+                    stages_content = json.dumps(yaml.safe_load(raw), ensure_ascii=False, indent=2)
+                else:
+                    stages_content = raw
 
         return f"""<character name="{char_name}" type="{entry_type}">
 {md_content}

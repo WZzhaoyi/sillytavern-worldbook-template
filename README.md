@@ -40,7 +40,7 @@ pip install -r requirements.txt
 
 ### 启用角色状态管理（推荐）
 
-`_stages.json` 仅声明状态结构——要让变量**自动计算**与**阶段内容按区间裁剪**真正生效，需要在 SillyTavern 内安装运行时：
+`_stages.json` 或 `_stages.yaml` 仅声明状态结构——要让变量**自动计算**与**阶段内容按区间裁剪**真正生效，需要在 SillyTavern 内安装运行时：
 
 1. **安装 JS-Slash-Runner 扩展**
    - 在 SillyTavern「扩展」→「安装扩展」中填入：
@@ -66,7 +66,7 @@ project/
 ├── CLAUDE.md                 # Claude Code 项目入口
 ├── AGENTS.md                 # 配置中心与完整文档
 ├── literature/
-│   ├── characters/           # 角色档案（.md + _stages.json）
+│   ├── characters/           # 角色档案（.md + _stages.{json|yaml}）
 │   ├── scenarios/            # 场景剧本（含 YAML Frontmatter）
 │   ├── fanfic/               # 原始素材（【标题】(关键词) 格式）
 │   ├── original/             # 原著文本（可选）
