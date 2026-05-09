@@ -9,10 +9,12 @@
 
 ### 1.1 工作流
 
-所有项目遵循同一条串行流水线。有原著文本时从 Step 2 开始提取；无原著时从 Step 3 开始直接创作。
+所有项目遵循同一条串行流水线。有原著文本时从 Step 2 开始提取；无原著时从 Step 3 开始直接创作；有旧版世界书/角色卡导出时从 Step R 开始逆向恢复。
 
 ```
 Step 1  准备与配置
+  ↓
+Step R  逆向恢复            ← 有旧版世界书/角色卡导出（JSON）时执行
   ↓
 Step 2  章节概述            ← 有原著文本时执行
   ↓
@@ -48,7 +50,8 @@ project/
 │   ├── fanfic/               # 原始素材目录
 │   │   └── {设定文件}.txt    # 【标题】(关键词) 格式
 │   ├── original/             # 原著文本（可选）
-│   │   └── 章节概述.md       # Step 2 生成
+│   │   ├── 章节概述.md       # Step 2 生成
+│   │   └── {旧版导出}.json   # Step R 逆向恢复（世界书/角色卡导出）
 │   └── vocab/                # 参考词库（可选）
 ├── scripts/
 │   └── generate_sillytavern.py  # 主生成脚本
@@ -393,6 +396,179 @@ narrator:
    - `dimensions` → 状态维度定义
    - `narrator` → 叙事者信息（persona 首行作品类型必填）
    - 其他配置项按需调整
+
+### Step R: 逆向恢复（从世界书/角色卡恢复设定）
+
+> 如有sillytavern世界书/角色卡导出文件（JSON），可直接恢复到当前模板的设定文件结构。
+
+**输入**：世界书.json + 叙事者.json（放入 `literature/original/`）
+
+**SillyTavern JSON 格式规则**：
+
+世界书整体 JSON 结构：
+```json
+{
+  "entries": [
+    {
+      "uid": 0,
+      "key": ["关键词1", "关键词2"],
+      "keysecondary": [],
+      "comment": "条目名称",
+      "content": "正文内容",
+      "constant": false,
+      "selective": true,
+      "order": 100,
+      "position": 0,
+      "disable": false,
+      "group": "",
+      "probability": 100,
+      "depth": 4,
+      "sticky": 0,
+      "ignoreBudget": true
+    },
+    {
+      "uid": 1,
+      "key": ["关键词3"],
+      "comment": "另一个条目",
+      "content": "正文内容",
+      "constant": false,
+      "selective": true,
+      "order": 101,
+      "position": 0,
+      "depth": 4
+    }
+  ]
+}
+```
+
+角色卡整体 JSON 结构：
+```json
+{
+  "spec": "chara_card_v2",
+  "spec_version": "2.0",
+  "data": {
+    "name": "叙事者",
+    "description": "描述 + 风格样本",
+    "personality": "性格特征",
+    "scenario": "",
+    "first_mes": "第一个场景",
+    "alternate_greetings": ["备选场景1", "备选场景2"],
+    "system_prompt": "persona 配置",
+    "post_history_instructions": "style_instructions + state_instructions",
+    "creator_notes": "状态维度：维度1,维度2",
+    "tags": [],
+    "creator": "创作者"
+  }
+}
+```
+
+**事实确认原则**：
+- Agent 解析 JSON 后，必须先将识别结果列出供用户确认
+- 不确定的条目分类，必须询问用户
+- 任何从 JSON 推断的信息（如维度 id、阶段名称），必须标注为「推断」并请用户确认
+- **用户确认后**才能生成文件，避免错误写入
+
+**流程**：
+
+```
+Step R1: 文件放置
+  - JSON 文件放入 literature/original/
+  - 同原著文本处理方式
+         ↓
+Step R2: 解析 JSON + 分类确认
+  - 读取世界书.json，分析条目特征
+  - 给出分类建议（角色/设定/POV/关系）
+  - 列出所有条目分类结果，标记不确定项
+  - 用户确认/修正分类
+         ↓
+Step R3: 重建 AGENTS.md 配置
+  - 从角色条目的 content 中提取 stages 数据
+  - 从 stages 数据反推 dimensions 配置
+  - 从角色卡提取 narrator 配置
+  - 用户确认/补充
+         ↓
+Step R4: 生成设定文件（用户确认配置后）
+  - 调用对应 Step 的生成方法（见指令模板）
+         ↓
+Step R5: 运行脚本生成
+```
+
+**指令模板**：
+
+```markdown
+请解析以下 JSON 文件，恢复设定文件。
+
+**输入文件**：
+- literature/original/{作品名}世界书.json
+- literature/original/{作品名}叙事者.json
+
+**Step R2: 分类确认**
+
+读取世界书.json，遍历所有条目，根据以下特征进行分类：
+
+| 信号 | 类型 |
+|------|------|
+| group=="pov" | POV |
+| comment 以「视角_」开头 | POV |
+| comment 以「关系_」开头 | 关系 |
+| content 含 `<character` XML 标签 | 角色 |
+| content 含「性别」「性格」「外貌」键值对 | 角色 |
+| content 含世界观/设定关键词 | 设定 |
+| key 含 2+ 个可能是人名的词 | 关系 |
+| 其他 | 未知 |
+
+输出分类结果表格，列出：
+- 条目 uid、comment、key、content 摘要
+- 分类结果（确定/不确定）
+- 不确定项的建议类型及原因
+
+请用户确认或修正分类后，再继续。
+
+**Step R3: 重建 AGENTS.md 配置**
+
+维度配置重建：
+1. 收集所有角色条目，从 content 中提取 `<character_states>` 内的 stages 数据
+2. 对于每个维度名称，提取 ranges 边界
+3. 生成 dimensions 配置建议
+4. stages 名称需用户补充
+
+叙事者配置重建：
+- 从角色卡 system_prompt 提取 persona
+- 从 post_history_instructions 尝试拆分 style_instructions 和 state_instructions
+- 从角色卡 description 提取描述和风格样本
+- 用户确认/补充
+
+生成 AGENTS.md 配置区建议，用户确认后写入。
+
+**Step R4: 生成设定文件**（用户确认配置后执行）
+
+根据分类结果，调用对应 Step 的生成方法：
+
+| 条目类型 | 调用 Step |
+|---------|----------|
+| 角色 | Step 5 |
+| 设定 | Step 3 |
+| POV | Step 6 |
+| 关系 | Step 6 |
+| 场景 | Step 7 |
+
+Agent 应参考对应 Step 的指令模板执行生成，确保格式一致。
+
+**注意**：必须原样提取内容，不能简化或概括。如遇不确定内容，必须询问用户。
+```
+
+**信息丢失处理**：
+
+| 丢失信息 | 恢复方案 |
+|---------|---------|
+| 维度 id | Agent 根据 name 推断 |
+| 维度 description | Agent 推断或留空 |
+| 阶段名称（stages） | 用户补充 |
+| 场景 variables | 从 character_states 反推或留空 |
+| narrator.example_dialogue | 从 description 提取或留空 |
+| entry_types 配置 | 使用默认值 |
+
+---
 
 ### Step 2: 章节概述
 
