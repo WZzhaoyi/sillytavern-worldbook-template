@@ -118,11 +118,18 @@ class SillyTavernGenerator:
         if stages_file.exists():
             with open(stages_file, 'r', encoding='utf-8') as f:
                 raw = f.read()
-                # YAML 格式需转换为 JSON 供 <character_states> 使用
+                # 验证格式语法正确性
                 if self.stages_format == 'yaml':
-                    stages_content = json.dumps(yaml.safe_load(raw), ensure_ascii=False, indent=2)
+                    try:
+                        yaml.safe_load(raw)
+                    except yaml.YAMLError as e:
+                        raise ValueError(f"Invalid YAML in {stages_file}: {e}")
                 else:
-                    stages_content = raw
+                    try:
+                        json.loads(raw)
+                    except json.JSONDecodeError as e:
+                        raise ValueError(f"Invalid JSON in {stages_file}: {e}")
+                stages_content = raw
 
         return f"""<character name="{char_name}" type="{entry_type}">
 {md_content}
