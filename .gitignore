@@ -59,3 +59,4 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
+.alma-snapshots
