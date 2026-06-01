@@ -38,6 +38,17 @@ pip install -r requirements.txt
    ```
 5. 将 `output/` 下生成的 JSON 文件导入 SillyTavern
 
+### 转换角色阶段数据格式
+
+角色阶段数据可在 JSON/YAML 之间批量转换，脚本会同步更新 `AGENTS.md` 中的 `character_generation.stages_format`：
+
+```bash
+python scripts/convert_stages_format.py yaml
+python scripts/convert_stages_format.py json
+```
+
+默认转换 `literature/characters/*_stages.{json|yaml|yml}`，成功后删除源格式文件。可加 `--keep-source` 保留源文件，或用 `--dry-run` 预览操作。
+
 ### 启用角色状态管理（推荐）
 
 `_stages.json` 或 `_stages.yaml` 仅声明状态结构——要让变量**自动计算**与**阶段内容按区间裁剪**真正生效，需要在 SillyTavern 内安装运行时：
