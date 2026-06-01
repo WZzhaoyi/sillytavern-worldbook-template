@@ -49,6 +49,13 @@ python scripts/convert_stages_format.py json
 
 默认转换 `literature/characters/*_stages.{json|yaml|yml}`，成功后删除源格式文件。可加 `--keep-source` 保留源文件，或用 `--dry-run` 预览操作。
 
+如需修复已有阶段文件的兼容格式（例如 YAML 中 `characters:` 下未缩进的列表，或 JSON 中常见的单引号、尾随逗号、字符串内未转义双引号），可运行：
+
+```bash
+python scripts/convert_stages_format.py yaml --repair
+python scripts/convert_stages_format.py json --repair
+```
+
 ### 启用角色状态管理（推荐）
 
 `_stages.json` 或 `_stages.yaml` 仅声明状态结构——要让变量**自动计算**与**阶段内容按区间裁剪**真正生效，需要在 SillyTavern 内安装运行时：

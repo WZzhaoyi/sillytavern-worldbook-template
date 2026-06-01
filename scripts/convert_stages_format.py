@@ -24,6 +24,13 @@ class ConversionError(Exception):
     """用户可修复的转换错误。"""
 
 
+class IndentedSafeDumper(yaml.SafeDumper):
+    """PyYAML dumper that indents list items under their parent key."""
+
+    def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
+        return super().increase_indent(flow, False)
+
+
 def detect_project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -61,6 +68,11 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="只展示将执行的操作，不写入或删除文件。",
+    )
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="重写目标格式文件为兼容性最好的规范格式。YAML 会修复列表缩进；JSON 会尝试修复单引号、尾随逗号、字符串内未转义双引号。",
     )
     parser.add_argument(
         "--no-config-update",
@@ -117,26 +129,104 @@ def source_format_for(path: Path) -> Optional[str]:
     return None
 
 
-def iter_stage_files(characters_dir: Path, target_format: str) -> Iterable[Tuple[Path, str]]:
+def iter_stage_files(characters_dir: Path, target_format: str, repair: bool) -> Iterable[Tuple[Path, str]]:
     if not characters_dir.exists():
         return []
 
     files: List[Tuple[Path, str]] = []
     for path in sorted(characters_dir.glob("*_stages.*")):
         source_format = source_format_for(path)
-        if source_format and (source_format != target_format or path.suffix == ".yml"):
+        if source_format and (repair or source_format != target_format or path.suffix == ".yml"):
             files.append((path, source_format))
     return files
 
 
-def load_stage_data(path: Path, source_format: str) -> Any:
+def strip_code_fence(raw: str) -> str:
+    text = raw.strip()
+    match = re.fullmatch(r"```(?:json|yaml|yml)?\s*\n(.*?)\n```", text, re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else text
+
+
+def escape_unescaped_inner_json_quotes(raw: str) -> str:
+    result: List[str] = []
+    in_string = False
+    i = 0
+
+    while i < len(raw):
+        ch = raw[i]
+
+        if not in_string:
+            result.append(ch)
+            if ch == '"':
+                in_string = True
+            i += 1
+            continue
+
+        if ch == "\\":
+            result.append(ch)
+            if i + 1 < len(raw):
+                result.append(raw[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+
+        if ch == '"':
+            j = i + 1
+            while j < len(raw) and raw[j].isspace():
+                j += 1
+            next_ch = raw[j] if j < len(raw) else ""
+            if next_ch in ("", ":", ",", "}", "]"):
+                result.append(ch)
+                in_string = False
+            else:
+                result.append('\\"')
+            i += 1
+            continue
+
+        result.append(ch)
+        i += 1
+
+    return "".join(result)
+
+
+def load_json_data(raw: str, path: Path, repair: bool) -> Any:
+    text = strip_code_fence(raw)
+
+    try:
+        return json.loads(text) if text.strip() else {}
+    except json.JSONDecodeError as first_error:
+        if not repair:
+            raise ConversionError(f"Invalid JSON in {path}: {first_error}") from first_error
+
+    candidates = [
+        text,
+        escape_unescaped_inner_json_quotes(text),
+    ]
+
+    for candidate in candidates:
+        try:
+            return json.loads(candidate) if candidate.strip() else {}
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            data = yaml.safe_load(candidate)
+            return data if data is not None else {}
+        except yaml.YAMLError:
+            pass
+
+    raise ConversionError(
+        f"Cannot repair JSON in {path}. Please check quotes, brackets, and commas near the reported JSON error."
+    )
+
+
+def load_stage_data(path: Path, source_format: str, repair: bool) -> Any:
     raw = path.read_text(encoding="utf-8")
     try:
         if source_format == "json":
-            return json.loads(raw) if raw.strip() else {}
+            return load_json_data(raw, path, repair)
         return yaml.safe_load(raw) or {}
-    except json.JSONDecodeError as exc:
-        raise ConversionError(f"Invalid JSON in {path}: {exc}") from exc
     except yaml.YAMLError as exc:
         raise ConversionError(f"Invalid YAML in {path}: {exc}") from exc
 
@@ -144,7 +234,7 @@ def load_stage_data(path: Path, source_format: str) -> Any:
 def dump_stage_data(data: Any, target_format: str) -> str:
     if target_format == "json":
         return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-    return yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+    return yaml.dump(data, Dumper=IndentedSafeDumper, allow_unicode=True, sort_keys=False)
 
 
 def target_path_for(source_path: Path, target_format: str) -> Path:
@@ -159,6 +249,7 @@ def convert_file(
     keep_source: bool,
     overwrite: bool,
     dry_run: bool,
+    repair: bool,
 ) -> str:
     target_path = target_path_for(source_path, target_format)
 
@@ -169,11 +260,13 @@ def convert_file(
 
     if dry_run:
         action = f"{source_path} -> {target_path}"
-        if not keep_source:
+        if source_path == target_path:
+            action += " (repair)"
+        if not keep_source and source_path != target_path:
             action += " (remove source)"
         return action
 
-    data = load_stage_data(source_path, source_format)
+    data = load_stage_data(source_path, source_format, repair)
     target_path.write_text(dump_stage_data(data, target_format), encoding="utf-8")
 
     if not keep_source and source_path != target_path:
@@ -215,7 +308,7 @@ def main() -> int:
         agents_file = project_root / agents_file
 
     characters_dir = resolve_characters_dir(project_root, agents_file, args.characters_dir)
-    stage_files = list(iter_stage_files(characters_dir, args.target_format))
+    stage_files = list(iter_stage_files(characters_dir, args.target_format, args.repair))
 
     try:
         if not stage_files:
@@ -229,6 +322,7 @@ def main() -> int:
                     keep_source=args.keep_source,
                     overwrite=args.overwrite,
                     dry_run=args.dry_run,
+                    repair=args.repair,
                 )
                 print(result)
 
