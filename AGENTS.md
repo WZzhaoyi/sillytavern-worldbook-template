@@ -177,6 +177,9 @@ character_generation:
 # 输出配置
 # =============================================================================
 entry_types:
+  # 角色类型判定规则：
+  # - 存在同名 {角色名}_stages.json / .yaml / .yml → 主角组 protagonist
+  # - 不存在同名阶段数据文件 → 配角组 supporting
   # 主角组
   protagonist:
     prefix: ""

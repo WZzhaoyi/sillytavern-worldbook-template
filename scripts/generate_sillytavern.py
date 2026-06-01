@@ -11,8 +11,15 @@ import re
 import sys
 import yaml
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 from datetime import datetime
+
+
+class IndentedSafeDumper(yaml.SafeDumper):
+    """PyYAML dumper that indents list items under their parent key."""
+
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, False)
 
 
 class ConfigLoader:
@@ -97,6 +104,32 @@ class SillyTavernGenerator:
         if self.stages_format not in ('json', 'yaml'):
             raise ValueError(f"character_generation.stages_format must be 'json' or 'yaml', got: '{self.stages_format}'")
 
+    def find_stages_file(self, char_name: str) -> Tuple[Path, str]:
+        preferred_file = self.characters_dir / f"{char_name}_stages.{self.stages_format}"
+        if preferred_file.exists():
+            return preferred_file, self.stages_format
+
+        for stages_format, suffix in (("json", ".json"), ("yaml", ".yaml"), ("yaml", ".yml")):
+            stages_file = self.characters_dir / f"{char_name}_stages{suffix}"
+            if stages_file.exists():
+                return stages_file, stages_format
+
+        return preferred_file, self.stages_format
+
+    def normalize_stages_content(self, raw: str, stages_file: Path, stages_format: str) -> str:
+        if stages_format == 'yaml':
+            try:
+                data = yaml.safe_load(raw) if raw.strip() else {}
+            except yaml.YAMLError as e:
+                raise ValueError(f"Invalid YAML in {stages_file}: {e}")
+            return yaml.dump(data, Dumper=IndentedSafeDumper, allow_unicode=True, sort_keys=False)
+
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in {stages_file}: {e}")
+        return json.dumps(data, ensure_ascii=False, indent=2)
+
     def get_entry_type_config(self, entry_type: str) -> Dict[str, Any]:
         return self.entry_types.get(entry_type, {
             'prefix': '', 'order_start': 100, 'order_step': 1, 'depth': 4,
@@ -105,7 +138,7 @@ class SillyTavernGenerator:
 
     def merge_character_files(self, char_name: str, entry_type: str = "protagonist") -> str:
         md_file = self.characters_dir / f"{char_name}.md"
-        stages_file = self.characters_dir / f"{char_name}_stages.{self.stages_format}"
+        stages_file, stages_format = self.find_stages_file(char_name)
 
         if not md_file.exists():
             print(f"Warning: {md_file} not found")
@@ -118,18 +151,7 @@ class SillyTavernGenerator:
         if stages_file.exists():
             with open(stages_file, 'r', encoding='utf-8') as f:
                 raw = f.read()
-                # 验证格式语法正确性
-                if self.stages_format == 'yaml':
-                    try:
-                        yaml.safe_load(raw)
-                    except yaml.YAMLError as e:
-                        raise ValueError(f"Invalid YAML in {stages_file}: {e}")
-                else:
-                    try:
-                        json.loads(raw)
-                    except json.JSONDecodeError as e:
-                        raise ValueError(f"Invalid JSON in {stages_file}: {e}")
-                stages_content = raw
+                stages_content = self.normalize_stages_content(raw, stages_file, stages_format)
 
         return f"""<character name="{char_name}" type="{entry_type}">
 {md_content}
@@ -139,13 +161,20 @@ class SillyTavernGenerator:
 </character_states>
 </character>"""
 
-    def discover_characters(self) -> List[str]:
+    def has_character_stages(self, char_name: str) -> bool:
+        return any(
+            (self.characters_dir / f"{char_name}_stages{suffix}").exists()
+            for suffix in (".json", ".yaml", ".yml")
+        )
+
+    def discover_characters(self) -> List[Tuple[str, str]]:
         if not self.characters_dir.exists():
             return []
         chars = []
         for md_file in self.characters_dir.glob("*.md"):
-            if not md_file.stem.endswith('_stages'):
-                chars.append(md_file.stem)
+            char_name = md_file.stem
+            entry_type = "protagonist" if self.has_character_stages(char_name) else "supporting"
+            chars.append((char_name, entry_type))
         return sorted(chars)
 
     def create_character_entry(self, char_name: str, entry_id: int, entry_type: str = "protagonist") -> Dict[str, Any]:
@@ -550,10 +579,10 @@ class SillyTavernGenerator:
         print(f"发现 {len(characters)} 个角色")
 
         print("\n生成角色条目...")
-        for char_name in characters:
-            entries.append(self.create_character_entry(char_name, current_id, "protagonist"))
+        for char_name, entry_type in characters:
+            entries.append(self.create_character_entry(char_name, current_id, entry_type))
             current_id += 1
-            print(f"  [OK] {char_name}")
+            print(f"  [OK] {char_name} ({entry_type})")
 
         print("\n生成视角条目...")
         pov_entries = self.extract_pov_entries(current_id)
