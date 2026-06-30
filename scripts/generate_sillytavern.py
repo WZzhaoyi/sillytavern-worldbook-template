@@ -343,7 +343,7 @@ class SillyTavernGenerator:
                 "uid": start_id + len(entries),
                 "key": keys,
                 "keysecondary": [],
-                "comment": f"{type_config.get('prefix', '视角_')}{name}",
+                "comment": f"{type_config.get('prefix', '身份_')}{name}",
                 "content": f"### {name}\n\n{pov_content}",
                 "constant": is_default,
                 "selective": not is_default,
@@ -363,7 +363,8 @@ class SillyTavernGenerator:
                 "vectorized": defaults.get('vectorized', False),
                 "ignoreBudget": type_config.get('ignore_budget', True),
                 "excludeRecursion": defaults.get('exclude_recursion', False),
-                "preventRecursion": defaults.get('prevent_recursion', False)
+                "preventRecursion": defaults.get('prevent_recursion', False),
+                "groupOverride": True
             }
             entries.append(entry)
 
@@ -584,7 +585,7 @@ class SillyTavernGenerator:
             current_id += 1
             print(f"  [OK] {char_name} ({entry_type})")
 
-        print("\n生成视角条目...")
+        print("\n生成身份/视角条目...")
         pov_entries = self.extract_pov_entries(current_id)
         entries.extend(pov_entries)
         current_id += len(pov_entries)
