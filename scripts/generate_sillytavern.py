@@ -512,9 +512,11 @@ class SillyTavernGenerator:
                                 f'_.set("{char_name}.{short_dim_name}", 0, {var_value});'
                             )
 
-        if variable_lines:
+        if variable_lines or pov_value:
             init_block = "\n<details>\n<summary>角色状态初始化</summary>\n<character_states_init>\n"
             init_block += "\n".join(variable_lines)
+            if pov_value:
+                init_block += f"\n{'' if not variable_lines else ''}{pov_value}"
             init_block += "\n</character_states_init>\n</details>"
             body = body + "\n" + init_block
 
