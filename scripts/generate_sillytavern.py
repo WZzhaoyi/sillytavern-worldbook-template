@@ -343,7 +343,7 @@ class SillyTavernGenerator:
                 "uid": start_id + len(entries),
                 "key": keys,
                 "keysecondary": [],
-                "comment": f"{type_config.get('prefix', '视角_')}{name}",
+                "comment": f"{type_config.get('prefix', '身份_')}{name}",
                 "content": f"### {name}\n\n{pov_content}",
                 "constant": is_default,
                 "selective": not is_default,
@@ -363,11 +363,35 @@ class SillyTavernGenerator:
                 "vectorized": defaults.get('vectorized', False),
                 "ignoreBudget": type_config.get('ignore_budget', True),
                 "excludeRecursion": defaults.get('exclude_recursion', False),
-                "preventRecursion": defaults.get('prevent_recursion', False)
+                "preventRecursion": defaults.get('prevent_recursion', False),
+                "groupOverride": True
             }
             entries.append(entry)
 
         return entries
+
+    def validate_pov_keywords(self, pov_entries: List[Dict[str, Any]]) -> None:
+        """校验场景声明的 pov 关键词是否在正文中出现。"""
+        scenarios = self.load_scenarios()
+        if not scenarios:
+            return
+
+        # 建立 pov 关键词索引：关键词 → 条目名
+        pov_keymap = {}
+        for e in pov_entries:
+            for key in e.get('key', []):
+                pov_keymap[key] = e['comment']
+
+        for scenario in scenarios:
+            pov = scenario.get('pov')
+            if not pov:
+                continue
+            body = scenario['body']
+            fname = scenario['file']
+            if pov not in body:
+                print(f"  ⚠️  场景「{fname}」声明 pov={pov}，但正文未找到关键词「{pov}」")
+            elif pov not in pov_keymap:
+                print(f"  ⚠️  场景「{fname}」声明 pov={pov}，但该关键词未匹配任何 POV 条目")
 
     def extract_relationship_entries(self, start_id: int) -> List[Dict[str, Any]]:
         entries = []
@@ -445,27 +469,33 @@ class SillyTavernGenerator:
         cleaned_lines = [line.strip() for line in lines if line.strip()]
         return '\n'.join(cleaned_lines)[:max_length]
 
-    def parse_scenario_file(self, file_path: Path) -> str:
+    def parse_scenario_file(self, file_path: Path) -> dict:
+        """Parse a scenario file, returning {'body': str, 'pov': str|None, 'file': str}."""
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
         parts = re.split(r'^---\s*$', content, maxsplit=2, flags=re.MULTILINE)
         if len(parts) < 3:
-            return content.strip()
+            return {'body': content.strip(), 'pov': None, 'file': file_path.name}
 
         frontmatter = parts[1]
         body = parts[2].strip()
 
         variable_lines = []
         in_variables = False
+        pov_value = None
 
         for line in frontmatter.split('\n'):
-            line = line.strip()
-            if line.startswith('variables:'):
+            line_stripped = line.strip()
+            if line_stripped.startswith('pov:'):
+                raw = line_stripped[4:].strip()
+                pov_value = raw if raw and raw.lower() != 'default' else None
+                continue
+            if line_stripped.startswith('variables:'):
                 in_variables = True
                 continue
-            if in_variables and line and not line.startswith('#'):
-                match = re.search(r'^([^:]+):\s*\{(.*)\}', line)
+            if in_variables and line_stripped and not line_stripped.startswith('#'):
+                match = re.search(r'^([^:]+):\s*\{(.*)\}', line_stripped)
                 if match:
                     char_name = match.group(1).strip()
                     vars_str = match.group(2)
@@ -482,23 +512,24 @@ class SillyTavernGenerator:
                                 f'_.set("{char_name}.{short_dim_name}", 0, {var_value});'
                             )
 
-        if not variable_lines:
-            return body
+        if variable_lines or pov_value:
+            init_block = "\n<details>\n<summary>角色状态初始化</summary>\n<character_states_init>\n"
+            init_block += "\n".join(variable_lines)
+            if pov_value:
+                init_block += f"\n{'' if not variable_lines else ''}{pov_value}"
+            init_block += "\n</character_states_init>\n</details>"
+            body = body + "\n" + init_block
 
-        init_block = "\n<details>\n<summary>角色状态初始化</summary>\n<character_states_init>\n"
-        init_block += "\n".join(variable_lines)
-        init_block += "\n</character_states_init>\n</details>"
+        return {'body': body, 'pov': pov_value, 'file': file_path.name}
 
-        return body + "\n" + init_block
-
-    def load_scenarios(self) -> List[str]:
+    def load_scenarios(self) -> List[dict]:
         if not self.scenarios_dir.exists():
             return []
         scenarios = []
         for file_path in sorted(self.scenarios_dir.glob("*.md")):
-            greeting = self.parse_scenario_file(file_path)
-            if greeting:
-                scenarios.append(greeting)
+            result = self.parse_scenario_file(file_path)
+            if result['body']:
+                scenarios.append(result)
 
         return scenarios
 
@@ -523,8 +554,8 @@ class SillyTavernGenerator:
         defaults = self.silly_defaults.get('narrator', {})
 
         scenarios = self.load_scenarios()
-        first_mes = scenarios[0] if scenarios else ""
-        alternate_greetings = scenarios[1:] if len(scenarios) > 1 else []
+        first_mes = scenarios[0]['body'] if scenarios else ""
+        alternate_greetings = [s['body'] for s in scenarios[1:]] if len(scenarios) > 1 else []
 
         dim_names = [d['name'] for d in self.dimensions]
 
@@ -584,13 +615,16 @@ class SillyTavernGenerator:
             current_id += 1
             print(f"  [OK] {char_name} ({entry_type})")
 
-        print("\n生成视角条目...")
+        print("\n生成身份/视角条目...")
         pov_entries = self.extract_pov_entries(current_id)
         entries.extend(pov_entries)
         current_id += len(pov_entries)
         for e in pov_entries:
             tag = "[默认]" if e["constant"] else "[可选]"
             print(f"  {tag} {e['comment']} (group={e['group']}, sticky={e['sticky']})")
+
+        # 校验场景声明的 pov 关键词是否在正文中出现
+        self.validate_pov_keywords(pov_entries)
 
         print("\n生成设定条目...")
         setting_entries = self.extract_setting_entries(current_id)
