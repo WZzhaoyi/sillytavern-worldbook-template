@@ -1,7 +1,7 @@
 # SillyTavern 同人小说世生成系统
 
-> **Version**: 1.2.0  
-> **Purpose**: 基于角色状态系统，自动生成SillyTavern兼容的世界书和叙事者角色卡
+> **Version**: 3.0.0
+> **Purpose**: 基于 MVU 生命周期和多实体状态模型，生成 SillyTavern 世界书与叙事者角色卡
 
 ---
 
@@ -9,9 +9,11 @@
 
 ### 1.1 工作流
 
-所有项目遵循同一条串行流水线。有原著文本时从 Step 2 开始提取；无原著时从 Step 3 开始直接创作；有旧版世界书/角色卡导出时从 Step R 开始逆向恢复。
+所有项目遵循同一条串行流水线。新作品先执行 Step 0；有原著文本时 Step 0 可简化后从 Step 2 开始提取；无原著时从 Step 3 开始直接创作；有旧版世界书/角色卡导出时从 Step R 开始逆向恢复。
 
 ```
+Step 0  初始策划蓝图        ← 新作品推荐，先设计规则、循环、事件与状态
+  ↓
 Step 1  准备与配置
   ↓
 Step R  逆向恢复            ← 有旧版世界书/角色卡导出（JSON）时执行
@@ -24,7 +26,7 @@ Step 4  风格样本            ← 可选，推荐
   ↓
 Step 5  角色档案
   ↓
-Step 6  关系网 / 身份视角    ← 可选
+Step 6  关系网               ← 可选
   ↓
 Step 7  场景剧本
   ↓
@@ -39,10 +41,13 @@ Step 9  导入 SillyTavern
 project/
 ├── CLAUDE.md                 # Claude Code项目入口
 ├── AGENTS.md                 # 本指南与配置中心
+├── docs/
+│   └── initial-planning-guide.md # Step 0 初始策划方法
 ├── literature/
+│   ├── 策划蓝图.md           # Step 0 输出，不参与生成器扫描
 │   ├── characters/           # 角色资产目录
 │   │   ├── {角色A}.md
-│   │   ├── {角色A}_stages.{json|yaml}
+│   │   ├── {角色A}_stages.{json|yaml} # 阶段表现规则，不保存运行时值
 │   │   ├── {角色B}.md
 │   │   └── {角色B}_stages.{json|yaml}
 │   ├── scenarios/            # 场景剧本目录
@@ -65,6 +70,7 @@ project/
 
 | 文件类型 | 命名格式 | 示例 |
 |---------|---------|------|
+| 策划蓝图 | `策划蓝图.md` | `策划蓝图.md` |
 | 章节概述 | `章节概述.md` | `章节概述.md` |
 | 角色基础档案 | `{角色名}.md` | `张三.md` |
 | 角色阶段数据 | `{角色名}_stages.{json\|yaml}` | `张三_stages.json` 或 `张三_stages.yaml` |
@@ -83,10 +89,10 @@ project/
 
 改动本节时严格遵守，否则 `python scripts/generate_sillytavern.py` 会直接解析失败：
 
-1. **只改值，不改结构**：键名（`project:`、`dimensions:` 等）、列表层级、缩进深度必须保持原样。新增维度照抄已有 `- id: ...` 块整体缩进。
+1. **保留配置骨架，扩展指定位置**：不得重命名 `project`、`state_model`、`mvu` 等顶层键，也不得改变世界/人物/物品/地点/事件五个核心集合的 `path` 与 `kind`。允许按策划蓝图增删完整的 `character_metrics` 块和集合 `fields`；新增内容必须照抄同类块的层级与缩进。生成器要求的生命周期字段不可删除。
 2. **缩进统一用 2 空格**：绝不用 Tab，绝不混合 2/4 空格；同一层级对齐必须完全一致。
 3. **冒号后必须有空格**：`name: "值"` ✓；`name:"值"` ✗。
-4. **`stages` 数量 = `ranges` 长度 − 1**：`ranges: [0, 25, 50, 75, 100]`（5 个边界）→ `stages` 必须正好 4 条；数量错了会导致阶段内容错位。
+4. **`stages` 数量 = `ranges` 长度 − 1**：`ranges: [0, 25, 50, 75, 100]`（5 个边界）→ `stages` 必须正好 4 条。区间统一为左闭右开，只有最后一段包含最大值；`stages` 按从高到低排列。
 5. **多行字符串用 `|` 或 `>`，且正文缩进必须比键多 2 格**：
    ```yaml
    persona: >
@@ -108,46 +114,119 @@ project:
   description: "{一句话描述你的作品}"
 
 # =============================================================================
-# 状态维度定义（核心配置）
-# 定义角色状态追踪的各个维度，每个维度有独立的阶段划分
-# ranges 数组定义阶段边界，stages 数量必须等于 ranges长度-1
-# stages 按从高到低排列（最后一个阶段对应最低范围）
+# MVU 状态模型（唯一事实源）
+# 世界为单例；人物、物品、地点、事件为按名称索引的实体集合。
+# 不要在两个集合里重复保存同一事实：人物位置写在人物，物品归属写在物品。
 # =============================================================================
-dimensions:
-  # 维度1示例：角色对主角的情感
-  - id: "affection"
-    name: "{维度1名称}"
-    description: "{维度1描述}"
-    ranges: [0, 25, 50, 75, 100]
-    stages:
-      - "{阶段4名称}"    # 76-100
-      - "{阶段3名称}"    # 51-75
-      - "{阶段2名称}"    # 26-50
-      - "{阶段1名称}"    # 0-25
+state_model:
+  character_metrics:
+    - id: "affection"
+      name: "好感"
+      description: "人物对主角的信任与亲近程度"
+      initial: 0
+      change:
+        minor: [1, 2]
+        major: [3, 5]
+      ranges: [0, 25, 50, 75, 100]
+      stages:
+        - "生死相托"
+        - "主动亲近"
+        - "初步信任"
+        - "陌生戒备"
 
-  # 维度2示例：角色的某种状态变化
-  - id: "corruption"
-    name: "{维度2名称}"
-    description: "{维度2描述}"
-    ranges: [0, 30, 60, 100]
-    stages:
-      - "{阶段3名称}"    # 61-100
-      - "{阶段2名称}"    # 31-60
-      - "{阶段1名称}"    # 0-30
+    - id: "corruption"
+      name: "异化"
+      description: "角色受超自然力量或负面影响改变的程度"
+      initial: 0
+      change:
+        minor: [1, 2]
+        major: [3, 5]
+      ranges: [0, 30, 60, 100]
+      stages:
+        - "彻底失控"
+        - "显著异化"
+        - "稳定"
 
-  # 维度3示例：主角自身的成长维度
-  - id: "power"
-    name: "{维度3名称}"
-    description: "{维度3描述}"
-    ranges: [0, 20, 40, 60, 80, 100]
-    stages:
-      - "{阶段5名称}"    # 81-100
-      - "{阶段4名称}"    # 61-80
-      - "{阶段3名称}"    # 41-60
-      - "{阶段2名称}"    # 21-40
-      - "{阶段1名称}"    # 0-20
+  collections:
+    world:
+      path: "世界"
+      label: "世界"
+      kind: "singleton"
+      fields:
+        已初始化: {type: "boolean", default: false, panel: false}
+        回合: {type: "number", default: 0, min: 0}
+        场景: {type: "string", default: "未初始化"}
+        场景摘要: {type: "string", default: ""}
+        时间: {type: "string", default: "未设定"}
+        当前地点: {type: "string", default: "未设定"}
+        天气: {type: "string", default: "未设定"}
 
-  # 可按需增减维度，每个维度的 stages数量 = ranges长度 - 1
+    characters:
+      path: "人物"
+      label: "人物"
+      kind: "collection"
+      fields:
+        在场: {type: "boolean", default: false}
+        所在地点: {type: "string", default: ""}
+        状态: {type: "string_list", default: []}
+        当前目标: {type: "string", default: ""}
+        关系: {type: "string", default: ""}
+        数值: {type: "metrics", default: {}}
+        备注: {type: "string", default: ""}
+
+    items:
+      path: "物品"
+      label: "物品"
+      kind: "collection"
+      fields:
+        已知: {type: "boolean", default: false}
+        持有者: {type: "string", default: ""}
+        所在地点: {type: "string", default: ""}
+        数量: {type: "number", default: 1, min: 0}
+        状态: {type: "string", default: "完好"}
+        描述: {type: "string", default: ""}
+        备注: {type: "string", default: ""}
+
+    locations:
+      path: "地点"
+      label: "地点"
+      kind: "collection"
+      fields:
+        已发现: {type: "boolean", default: false}
+        状态: {type: "string", default: "正常"}
+        描述: {type: "string", default: ""}
+        备注: {type: "string", default: ""}
+
+    events:
+      path: "事件"
+      label: "事件"
+      kind: "collection"
+      fields:
+        状态: {type: "enum", default: "未触发", values: ["未触发", "进行中", "已完成", "已失败", "已搁置"]}
+        阶段: {type: "enum", default: "起", values: ["起", "承", "转", "合"]}
+        地点: {type: "string", default: ""}
+        参与者: {type: "string_list", default: []}
+        摘要: {type: "string", default: ""}
+        结果: {type: "string", default: ""}
+        备注: {type: "string", default: ""}
+
+# =============================================================================
+# MVU 运行时配置
+# 生成的角色卡会自动携带 MVU、ZOD Schema、隐藏变量块正则和无 iframe 悬浮面板。
+# 运行时状态统一保存于 stat_data，不再依赖 _.set 或外置角色状态管理脚本。
+# =============================================================================
+mvu:
+  runtime_url: "https://testingcf.jsdelivr.net/gh/NLKASHEI/MVU-offline@v1.0.2/mvu_bundle_full.js"
+  schema_helper_url: "https://testingcf.jsdelivr.net/gh/StageDog/tavern_resource/dist/util/mvu_zod.js"
+  max_characters_per_turn: 3
+  max_entities_per_turn: 6
+  max_active_events: 3
+  preflight_max_words: 100
+  update_analysis_max_words: 120
+  panel:
+    enabled: true
+    title: "{作品名} · 世界状态"
+    width: 840
 
 # =============================================================================
 # 路径配置
@@ -188,7 +267,6 @@ entry_types:
     depth: 4
     position: 0
     constant: false
-    selective: true
     ignore_budget: true
   
   # 配角组
@@ -199,11 +277,12 @@ entry_types:
     depth: 5
     position: 0
     constant: false
-    selective: true
-    ignore_budget: true
+    ignore_budget: false
   
   # 设定条目（世界观、剧情指导等）
   # source_files: 设定文件扫描路径（glob模式），文件内必须为【标题】(关键词) 格式
+  # active_layer/layers: 可选的构建时互斥内容层。公共设定始终扫描，只额外扫描当前层。
+  # 例：active_layer: "前期"，layers: {前期: ["literature/fanfic/layers/early/*.txt"], 后期: [...]}
   # 标题前加 ★（如 ★【世界观】）表示常驻上下文，忽略关键词强制注入；否则走关键词触发
   # 不要包含原著正文路径（会被当作设定条目错误解析）
   setting:
@@ -213,66 +292,12 @@ entry_types:
     depth: 2
     position: 0
     constant: false
-    selective: false
-    ignore_budget: true
+    ignore_budget: false
     source_files:
       - "literature/fanfic/*.txt"
+    active_layer: ""
+    layers: {}
 
-  # 身份/视角条目（互斥组，同时只激活一个）
-  # 同时承载叙事视角切换和对白角色扮演切换，统一使用 SillyTavern Inclusion Group 互斥机制
-  # 每个条目为一种「AI 当前身份 + 工作模式」：
-  #   - 叙事模式：以叙述者身份续写（如第一人称限制、第三人称全知等）
-  #   - 角色扮演模式：以指定角色身份进行对白（如【角色·张三】）
-  # 条目间互斥，同时只激活一种身份
-  # default_index 决定默认激活哪个条目（0 = 文件中第一个条目）
-  #
-  # ⚠️ SillyTavern 配置提醒：POV 组所有条目已硬编码 groupOverride: true，
-  #    导入后无需手动配置 Prioritize Inclusion，同组激活时自动按 Order 确定性选中。
-  #
-  # 关键词要求见下方「身份/视角文件格式说明」
-  pov:
-    prefix: "身份_"
-    order_start: 40
-    order_step: 1
-    depth: 2
-    position: 0
-    constant: false
-    selective: true
-    ignore_budget: true
-    group: "pov"
-    sticky: 999
-    source_file: "literature/fanfic/视角切换.txt"
-    default_index: 0
-
-  # ── 身份/视角文件格式说明 ──────────────────────────────────────────
-  # 文件路径：由 pov.source_file 配置（默认 literature/fanfic/视角切换.txt）
-  #
-  # 格式：与设定总集、关系网相同的【标题】（关键词）格式
-  # 每个条目声明 AI 的当前身份和输出方式。固定三种类型：
-  #
-  #   【第三人称限制视角】（第三人称视角）
-  #   【第一人称视角】（第一人称视角）
-  #   【角色·{角色名}】（切换{角色名},扮演{角色名}）
-  #
-  # 前两种为叙事模式，默认激活第一个（第三人称限制视角）。
-  # 角色扮演条目按需添加，每个可扮演角色对应一条。
-  #
-  # 角色扮演条目必须包含以下要素：
-  #   - 输出形式（关键）：明确声明直接对白、非叙事段落、1-3句、动作用星号包裹
-  #   - 与 {{user}} 对话的提示（{{user}} 是 SillyTavern 宏，自动替换为用户 persona 名）
-  #   - 性格：从角色档案提取核心性格
-  #   - 语气：短句/豪爽/温柔等
-  #   - 说话习惯：口头禅、自称方式、句式特点
-  #   - 禁止项：长篇叙事、心理活动描述、第三人称场景描写
-  #
-  # ⚠️ 关键词设计原则（防止误触发）：
-  #   - 关键词必须是用户「显式切换意图」下才会出现的短语
-  #   - 叙事类：用元指令词，如「第三人称视角」「第一人称视角」——叙事正文不会出现
-  #   - 角色扮演类：用「切换{角色名}」「扮演{角色名}」——叙事中提及角色名不会误触发
-  #   - 禁止用角色名、昵称单独作为关键词 → 叙事中角色名出现频率极高
-  #   - 每条目 1-2 个关键词即可，精确优先于覆盖
-  # ─────────────────────────────────────────────────────────────────
-  
   # 关系网
   relationship:
     prefix: "关系_"
@@ -281,8 +306,7 @@ entry_types:
     depth: 6
     position: 0
     constant: false
-    selective: true
-    ignore_budget: true
+    ignore_budget: false
     source_file: "literature/fanfic/关系网.txt"
 
 # =============================================================================
@@ -300,7 +324,7 @@ sillytavern_defaults:
     prevent_recursion: false
     add_memo: true
     scan_depth: 2
-    selective_logic: 0
+    selective_logic: 0        # AND ANY；关系条目要求主关键词 + 任一可选过滤键
   
   narrator:
     spec: "chara_card_v3"
@@ -315,16 +339,16 @@ sillytavern_defaults:
 #   description + example_dialogue_file → data.description
 #     风格锚点主阵地：永驻上下文，放原作风格样本段落
 #   persona → data.system_prompt
-#     叙事者身份 + 作品基调 + 描写风格 + 叙事原则 + 身份切换（由世界书控制）。不含世界观事实。
-#   style_instructions → data.post_history_instructions 前半部分
+#     只放叙事者身份、作品范围与叙事原则。不重复具体文风执行规则。
+#   style_instructions → data.post_history_instructions
 #     简明风格执行指令：将风格翻译为具体可执行的写作约束
-#   state_instructions → data.post_history_instructions 后半部分
-#     状态系统规则：变量计算与输出格式
+#   state_model + mvu → 世界书生命周期条目、ZOD Schema、开局快照与悬浮面板
 #
 # 【职责分工】（避免重复注入）
 #   世界观/机制/角色事实 → 世界书设定条目（Step 3 设定总集）
 #   场景前提与开场     → 场景剧本 first_mes（Step 7）
-#   叙事身份与风格     → 此 persona 字段
+#   叙事身份与原则     → persona
+#   具体文风执行规则   → style_instructions（保持简短）
 # =============================================================================
 narrator:
   name: "{作品名}"
@@ -334,87 +358,19 @@ narrator:
   example_dialogue_file: "literature/fanfic/示例对话.txt"
   example_dialogue_max_length: 4000
   style_instructions: |
-    模仿上文提供的风格参考段落。根据当前世界书激活的身份/视角条目叙述：
-    - {具体特征1，如：紧贴当前视角角色的内心体验，聚焦感官细节}
+    模仿上文提供的风格参考段落：
+    - {固定叙事视角，如：使用第三人称限制视角，只写当前角色可感知的内容}
     - {具体特征2，如：短句为主，动作描写干练不加修饰}
     - {具体特征3，如：对话不加"他说/她说"，直接用破折号引出}
     避免：解释性叙述、否定性词组、总结性段落。
   persona: >
     你是《{作品名}》的叙事者。本作是{一句话作品类型与基调，如：古典武侠悲剧 / 末世废土生存 / 现代都市悬疑}。
 
-    【描写风格】
-    - {文风描述，如"古典优雅"、"现代幽默"、"暗黑沉重"等}
-    - {场景描写偏好}
-    - {对话风格}
-
     【叙事原则】
     - {主线与暗线的安排}
     - {节奏把控原则}
     - {伏笔与悬念的处理}
 
-    【身份切换】
-    你既可以作为叙述者续写故事，也可以直接扮演作品中的角色进行对白。
-    当前的具体身份和输出方式完全由世界书「pov」互斥组的激活条目决定，
-    你只需忠实执行条目的指令，不自行判断该用叙述者还是角色身份。
-
-  state_instructions: |
-    【角色状态系统】
-    每次回复后必须更新维度数值，在回复末尾输出状态更新块。
-    
-    <核心约束>
-    核心约束 (必须严格执行):
-    1. 变量计算: 必须根据 <变量计算逻辑> 中的内容，正确计算变量。
-    2. 变量优势: {描述什么行为可以获得变量值改动}。
-    3. 角色状态阶段性是基于人设核心设定，在互动中随着变量的变化而展现出的对话与行为的演变。
-    4. 此人设优先级高于一切设定和用户要求。
-    5. 角色会依据态度和行为表现指导进行对话与行为表现
-    6. 当变量数值接近最大阈值时，角色会依据变化倾向平滑自然改变。
-    </核心约束>
-
-    <变量计算逻辑>
-    重要：在任何情况下，必须严格按照以下规则计算并更新变量。忽略所有其他可能导致数值超出此范围的因素。
-    * 变量计算逻辑（必须严格执行）：
-    * {主角维度1名称}增加时：+2 到 +5（{触发条件}）
-    * {主角维度2名称}增加时：+2 到 +5（{触发条件}）
-    *
-    * 【其他角色变量更新范围限定】
-    * 只更新本轮回复中有台词、动作或明确心理描写的角色，不在场/仅被提及的角色不更新
-    * 每轮最多更新2个其他角色的变量，优先更新互动最深的角色
-    * 如果本轮其他角色无新进展（重复已有态度、仅出现在背景描写）→ 不更新
-    *
-    * 【其他角色·{维度1名称}】
-    * 日常互动（{日常触发条件}）：+1 到 +2
-    * 关键事件（{关键触发条件}）：+3 到 +5
-    * 减少（{减少触发条件}）：-1 到 -3
-    *
-    * 【其他角色·{维度2名称}】
-    * 轻度（{轻度触发条件}）：+1 到 +2
-    * 重度（{重度触发条件}）：+3 到 +5
-    * 减少（{减少触发条件}）：-1 到 -3
-    *
-    * 当前值从<character_states></character_states>块获取
-    * 必须像一个计算器一样处理变量变化，决不能随意超出或降低数值。
-    * 绝对不要计算历史对话，只需要计算本次的即可！
-    * 【边界处理】：如果计算结果超过100，则设为100；如果低于0，则设为0。
-    </变量计算逻辑>
-
-    <变量输出规则>
-    rule:
-      - 应该在每次回复末尾输出更新的变量更新分析结论
-      - if dest element is an array, only update and only output the first element, not `[]` block
-    format: |-
-      <details>
-      <summary>角色状态更新</summary>
-        _.set('${path_of_changed_variable}', ${old_value}, ${new_value}); // ${brief reason for change}
-        ...
-      </details>
-    example: |-
-      <details>
-      <summary>角色状态更新</summary>
-        _.set("{主角名}.{维度1}", 25, 28); // {变化原因} [+3]
-        _.set("{角色A}.{维度1}", 60, 63); // {变化原因} [+3]
-      </details>
-    </变量输出规则>
 ```
 
 ---
@@ -423,19 +379,66 @@ narrator:
 
 > 按顺序执行以下步骤。每步提供 Agent 指令模板，替换 `{占位符}` 后发送即可。
 
+### Step 0: 初始策划蓝图
+
+> 新作品推荐执行；有完整原著或旧版导出时可简化为“明确改编边界、状态字段和开局方案”。详细方法见 [`docs/initial-planning-guide.md`](docs/initial-planning-guide.md)。
+
+**目标**：先确定叙事系统如何持续运行，再创作具体百科。区分三类信息：
+
+- 作者固定：世界不变量、已有实体事实、内容层边界。
+- LLM 生成：受约束的 NPC、地点、机遇、遭遇和世界事件实例。
+- MVU 保存：本次开局已经发生的事实与跨回合变化。
+
+**输出**：`literature/策划蓝图.md`。蓝图至少回答：
+
+1. 玩家身份、固定叙事视角、世界回应方式和典型十轮体验是什么；
+2. 哪些规则永远成立，资源与成长如何形成闭环；
+3. 是否存在按地域、时代或成长阶段启停的内容层；
+4. 人物、物品、地点和事件各自需要追踪哪些会影响后续叙事的字段；
+5. 世界事件如何触发、分阶段推进、收束，并限制同时活跃数量；
+6. 哪些内容需要程序化生成，其输入、硬约束、持久化和去重规则是什么；
+7. 不同开局各自完整快照和第一个互动钩子是什么；
+8. 哪些变量高频、中频、低频更新，哪些内容根本不应进入状态。
+
+**约束**：
+
+- 不要把“可能发生的剧情”写成已发生事实；不要预写唯一主线结局。
+- 自定义开局只写 MVU 快照，不动态创建常驻世界书条目，避免多次开局互相污染。
+- 正文前检查只输出可观察的叙事约束，不要求展示模型隐藏思维过程。
+- 正文后仅更新本轮真实变化，不为刷新面板而强制改写未变化集合。
+
+**指令模板**：
+
+```markdown
+请先阅读 docs/initial-planning-guide.md，与我共同完成 Step 0。
+
+作品构想：{一句话构想或已有素材}
+
+请先区分：
+1. 必须由作者固定的世界规则与事实；
+2. 可以由 LLM 当场生成、但需要约束的内容；
+3. 必须由 MVU 跨回合保存的状态。
+
+按指南中的 `literature/策划蓝图.md` 模板提出最少必要问题；确认后写入文件。
+不要创作尚未确认的具体人物、势力或剧情结局。
+```
+
 ### Step 1: 准备与配置
 
 1. 复制 `CLAUDE.md`、`AGENTS.md`、`scripts/generate_sillytavern.py` 到新项目目录
-2. **Agent 初始化前应向用户确认以下创作倾向**，再据此填入 persona：
+2. 读取 `literature/策划蓝图.md`（如有），据此确认以下创作倾向：
    - 作品类型与基调（如：古典武侠悲剧 / 末世废土 / 现代都市悬疑）
+   - 固定叙事视角（如：第一人称、第三人称限制、第三人称全知）
    - 描写风格偏好（文风、场景、对话）
    - 叙事原则（主线/暗线安排、节奏、伏笔）
-   - 状态维度的语义（主角要追踪什么变化）
+   - 人物数值的语义、初始值和轻微/重大变化幅度
+   - 人物/物品/地点/事件面板需要追踪哪些字段
    - **阶段数据文件格式**：JSON 或 YAML（选定后统一使用，不可混用）
 3. 编辑 AGENTS.md 第2节配置区：
    - `project.name` → 作品名
-   - `dimensions` → 状态维度定义
-   - `narrator` → 叙事者信息（persona 首行作品类型必填）
+   - `state_model.character_metrics` → 人物数值定义
+   - `state_model.collections` → 世界/人物/物品/地点/事件字段定义
+   - `narrator` → 叙事者信息（persona 首行作品类型必填；固定视角写入 `style_instructions`）
    - 其他配置项按需调整
 
 ### Step R: 逆向恢复（从世界书/角色卡恢复设定）
@@ -495,7 +498,7 @@ narrator:
     "first_mes": "第一个场景",
     "alternate_greetings": ["备选场景1", "备选场景2"],
     "system_prompt": "persona 配置",
-    "post_history_instructions": "style_instructions + state_instructions",
+    "post_history_instructions": "style_instructions",
     "creator_notes": "状态维度：维度1,维度2",
     "tags": [],
     "creator": "创作者"
@@ -523,8 +526,8 @@ Step R2: 解析 JSON + 分类确认
   - 用户确认/修正分类
          ↓
 Step R3: 重建 AGENTS.md 配置
-  - 从角色条目的 content 中提取 stages 数据
-  - 从 stages 数据反推 dimensions 配置
+  - 优先从 MVU Schema / initvar / 更新协议恢复 state_model.character_metrics
+  - 从角色条目的 content 中提取各阶段行为数据
   - 从角色卡提取 narrator 配置
   - 用户确认/补充
          ↓
@@ -549,10 +552,9 @@ Step R5: 运行脚本生成
 
 | 信号 | 类型 |
 |------|------|
-| group=="pov" | POV |
-| comment 以「身份_」开头 | POV |
+| group=="pov" 或 comment 以「身份_」开头 | 旧版视角候选（不直接入库） |
 | comment 以「关系_」开头 | 关系 |
-| content 含 `<character` XML 标签 | 角色 |
+| content 含 `<character` / `<mvu_stage_contract>` XML 标签 | 角色 |
 | content 含「性别」「性格」「外貌」键值对 | 角色 |
 | content 含世界观/设定关键词 | 设定 |
 | key 含 2+ 个可能是人名的词 | 关系 |
@@ -567,15 +569,17 @@ Step R5: 运行脚本生成
 
 **Step R3: 重建 AGENTS.md 配置**
 
-维度配置重建：
-1. 收集所有角色条目，从 content 中提取 `<character_states>` 内的 stages 数据
-2. 对于每个维度名称，提取 ranges 边界
-3. 生成 dimensions 配置建议
-4. stages 名称需用户补充
+人物数值配置重建：
+1. 优先从角色卡 MVU Schema、`[initvar]` 和更新协议恢复维度 id、ranges、stages
+2. 收集角色条目，从 `<mvu_stage_contract>/<stage_rules>` 提取对应阶段的行为内容
+3. 若旧卡只保留人物阶段内容而没有数值边界，将 ranges 标记为推断并请用户确认
+4. 生成 state_model.character_metrics 配置建议
 
 叙事者配置重建：
 - 从角色卡 system_prompt 提取 persona
-- 从 post_history_instructions 尝试拆分 style_instructions 和 state_instructions
+- 从 post_history_instructions 提取 style_instructions
+- 如旧世界书含多个 POV/身份条目，将它们列为候选，由用户选定一个固定叙事视角后并入 style_instructions；不恢复运行时切换器
+- 从世界书 `[mvu_protocol]`、`[initvar]` 与角色卡 Tavern Helper 扩展恢复 MVU 配置
 - 从角色卡 description 提取描述和风格样本
 - 用户确认/补充
 
@@ -589,7 +593,7 @@ Step R5: 运行脚本生成
 |---------|----------|
 | 角色 | Step 5 |
 | 设定 | Step 3 |
-| POV | Step 6 |
+| 旧版视角候选 | 用户选定后并入 `style_instructions` |
 | 关系 | Step 6 |
 | 场景 | Step 7 |
 
@@ -605,7 +609,7 @@ Agent 应参考对应 Step 的指令模板执行生成，确保格式一致。
 | 维度 id | Agent 根据 name 推断 |
 | 维度 description | Agent 推断或留空 |
 | 阶段名称（stages） | 用户补充 |
-| 场景 variables | 从 character_states 反推或留空 |
+| 场景 state | 从开场消息 `<UpdateVariable>` 的 `/世界`、`/人物`、`/物品`、`/地点`、`/事件` 快照反推 |
 | narrator.example_dialogue | 从 description 提取或留空 |
 | entry_types 配置 | 使用默认值 |
 
@@ -658,14 +662,27 @@ Agent 应参考对应 Step 的指令模板执行生成，确保格式一致。
 **输出文件**：literature/fanfic/设定总集.txt
 
 **常驻条目**（标题前加 ★ 表示常驻上下文，脚本忽略关键词强制注入）：
-★【世界观】（背景,历史）
+★【世界公理】（背景,历史）
 ★【核心机制】（机制,规则）
-★【角色总览】（角色,阵营）
+
+常驻条目只保留缺失后会破坏世界逻辑的短规则。角色总览、历史细节和氛围说明不要常驻。
 
 **按需条目**（关键词触发，关键词必须是叙述文本中可能出现的具体词）：
 【{势力名}】（{势力名},{代称}）
 【{地点名}】（{地点名},{别称}）
 【{物品/概念}】（{名称},{相关词}）
+
+**程序化生成条目**（仅当策划蓝图定义了对应生成器）：
+【生成规则·{对象类型}】（{正文中会出现的对象类型词},{相关场景词}）
+输入：{当前地点、内容层、主角能力、已有实体}
+组合轴：{身份、目标、资源、危险、规模}
+硬约束：{地理可达、能力匹配、知识边界、风险与收益对称}
+持久化：{生成后写入人物/物品/地点/事件的哪些字段}
+去重与失效：{如何避免重名，何时移除}
+
+程序化生成规则描述“如何产生受约束实例”，不预写实例结果。只有缺少现成实体且当前场景确实需要时才使用；不得为了展示生成器而强行插入遭遇。
+
+**互斥内容层**：公共条目继续放在 `setting.source_files`；各层放入独立子目录并配置到 `setting.layers`，`active_layer` 只能选择一个。切换层后重新运行生成器并重新导入世界书。生成器不会把未选层写入产物，因此无需再用相反的提示词要求 LLM 自行判断当前层。
 
 > 角色个人档案由 Step 5 独立生成（`literature/characters/{角色名}.md`），脚本自动扫描入库，请勿在此重复写角色条目。本文件专注于势力、地点、物品、专有概念等世界观事实。
 
@@ -698,7 +715,7 @@ Agent 应参考对应 Step 的指令模板执行生成，确保格式一致。
 
 ### Step 5: 角色档案
 
-**目标**：为每个角色生成基础档案（.md）和阶段数据（_stages.{json|yaml}）。
+**目标**：为每个角色生成基础档案（.md）和阶段表现规则（_stages.{json|yaml}）。运行时数值由 MVU 保存，不写回阶段文件。
 
 **输出**：
 - `literature/characters/{角色名}.md`
@@ -743,71 +760,37 @@ Agent 应参考对应 Step 的指令模板执行生成，确保格式一致。
 - .md 使用极简键值对格式，不加粗、无列表符号
 - **外貌 / 台词风格 / 称呼习惯**：优先以 「」 引用原文短语（短句/词组，单条不超过20字），保留原著用词与语气；禁止用抽象形容词直接替代原文（如「冷淡疏离」应替换为 「"哼，不值一提"」）
 - _stages.json 使用标准JSON 或 _stages.yaml 使用标准YAML（按配置选定，不可混用）
+- `_stages` 只使用 `character_metrics.id → 阶段名 → 行为描述`，不得重复声明 ranges、角色名或运行时数值
+- 阶段名必须与 `state_model.character_metrics.stages` 完全一致；生成器会拒绝缺失或多余阶段
 - 阶段内容基于角色在原著中的实际变化轨迹撰写，关键行为尽量原文引证
 - 无法确定的信息标注为"未明确"
 ```
 
-### Step 6: 关系网 / 身份视角（可选）
+### Step 6: 关系网（可选）
 
-**目标**：生成角色间的关系条目，以及可选的身份/视角切换条目（包含叙事视角和对白角色扮演）。格式均为 `【标题】（关键词）`。
+**目标**：生成角色间的关系条目。叙事视角不生成世界书条目；创作者在 Step 0 选择一个固定视角，并在 Step 1 写入 `narrator.style_instructions`。
 
-**关系网输出**：`literature/fanfic/关系网.txt`
-**身份/视角输出**：`literature/fanfic/视角切换.txt`（由 `pov.source_file` 配置）
+**输出**：`literature/fanfic/关系网.txt`
 
 **指令模板**：
 
 ```markdown
-请生成关系网条目（及身份/视角切换条目，如需要）。
+请生成关系网条目。
 
 **参考**：章节概述、设定总集、已生成的角色档案
+**输出文件**：literature/fanfic/关系网.txt
 
-**输出文件**：
-- literature/fanfic/关系网.txt
-- literature/fanfic/视角切换.txt（如需身份/视角切换）
-
-**关系网格式**：
-【{角色A}与{角色B}的{关系主题}】（{角色A},{角色B},{别名}）
+**格式**：
+【{角色A}与{角色B}的{关系主题}】（{角色A},{角色B},{角色B别名}）
 {关系描述与动态表现}
 
-**身份/视角切换格式**（固定三种条目类型）：
-
+括号内第一个词是主关键词，其余词是 AND ANY 可选过滤键。只有正文同时出现角色A与角色B（或角色B别名）时才注入关系条目，避免只提到一人便加载整段关系资料。
 ```
-【第三人称限制视角】（第三人称视角）
-以主角的感知范围为边界叙述。只写主角能看到、听到、想到的内容...
-
-【第一人称视角】（第一人称视角）
-以"我"的口吻叙述，紧贴主角的主观体验...
-
-【角色·{角色名}】（切换{角色名},扮演{角色名}）
-你现在以「{角色名}」的身份与 {{user}} 进行对话。你不是在写小说，你就是{角色名}本人在聊天。
-
-**输出形式（关键）**：
-- 每次回复可用 1-2 句简短的环境感知或身心状态做铺垫（角色本人看到/听到/感受到的），然后自然转入对白
-- 对白为主体（2-4句），动作/表情/感官用星号包裹
-- 禁止：长篇客观叙事、跳出角色的心理分析、第三人称场景描写
-
-**角色设定**：
-- 性格：{从角色档案提取}
-- 语气：{角色语气特征}
-- 说话习惯：{口头禅、句式特点}
-```
-
-前两种为叙事模式（必须），最后一种按角色数量添加（每个可扮演角色一条）。
-默认激活文件中的第一个条目（第三人称限制视角）。
-
-**关键词要求**：必须是用户显式切换意图下才会出现的短语。叙事类用「第三人称视角」「第一人称视角」等元指令词；角色扮演类用「切换{角色名}」「扮演{角色名}」。禁止用角色名/昵称单独作关键词。
-```
-
 ### Step 7: 场景剧本
 
 **目标**：创建续写起点。脚本将第一个场景作为 first_mes，其余作为 alternate_greetings。
 
-**视角匹配**（重要）：
-每个场景都有最适配的视角——第一人称适合内心独白强的开场，第三人称全知适合多角色调度，等等。确定适配视角后，在正文中自然嵌入该视角 POV 条目的关键词。聊天开始时，SillyTavern 扫描 first_mes 会自动激活对应条目，覆盖默认视角（POV 组内 groupOverride 按 Order 排序，关键词触发的条目 Order 高于默认条目，确定性胜出）。
-- 两种思路：① 根据剧本内容找最适配的视角 → 嵌入关键词；② 根据选定视角定制剧本 → 使内容和关键词自然一致
-- 脚本会校验：若 YAML 声明了 `pov`，但正文未找到对应关键词 → 输出警告
-
-> ⚠️ 正文将作为 first_mes，LLM 视其为「作者示范」，决定后续回复的句式、长度和场景基调。目标 **500-900字**，过短锚定不足，过长拖累节奏。AI 的身份与输出方式（叙事/角色扮演）由世界书「pov」互斥组控制。
+> ⚠️ 正文将作为 first_mes，LLM 视其为「作者示范」，决定后续回复的句式、长度、视角和场景基调。目标 **500-900字**，过短锚定不足，过长拖累节奏。正文必须与 Step 1 选定的固定叙事视角一致。
 
 **输出**：`literature/scenarios/{序号}_{场景名}.md`
 
@@ -824,18 +807,53 @@ Agent 应参考对应 Step 的指令模板执行生成，确保格式一致。
 - 有原著：摘录对应段落为主干（≥70%），轻度衔接改写
 - 无原著：遵循 literature/fanfic/示例对话.txt 的风格
 - 结构：前情提要（顶部简述必要的前置剧情背景） → 场景切入 → 角色动作/对话 → 收束于待回应的钩子
-- 指定适配的身份/视角模式（参见 literature/fanfic/视角切换.txt 中的条目），并在生成的正文中自然包含对应条目的关键词以触发世界书激活
+- 严格遵循 `narrator.style_instructions` 中选定的固定叙事视角
 
-**variables**：列出在场角色各维度数值，需与角色弧线位置一致。
+**state**：这是本开局的完整状态快照。必须同时列出世界、人物、物品、地点、事件五个集合；无数据的集合写 `{}`。人物 `数值` 中只能使用 `character_metrics.id`，不接受中文显示名。生成器会用该快照覆盖基础 `[initvar]`，因此不同开局不会相互污染。
 
 **格式**：
 ---
 name: 场景名称
 description: 一句话描述
-pov: 第三人称视角       # 声明适配的视角关键词，脚本会校验正文是否包含该词
-variables:
-  {角色A}: {维度1: 20, 维度2: 15}
-  {角色B}: {维度1: 25, 维度2: 30}
+time: "第一日·黄昏"
+location: "{开局地点}"
+weather: "小雨"
+state:
+  世界:
+    回合: 0
+  人物:
+    {角色A}:
+      在场: true
+      所在地点: "{开局地点}"
+      状态: ["正常"]
+      当前目标: "{当前目标}"
+      关系: "{与主角的关系}"
+      数值: {affection: 20, corruption: 0}
+      备注: ""
+  物品:
+    {关键物品}:
+      已知: true
+      持有者: "{角色A}"
+      所在地点: ""
+      数量: 1
+      状态: "完好"
+      描述: "{简短描述}"
+      备注: ""
+  地点:
+    {开局地点}:
+      已发现: true
+      状态: "正常"
+      描述: "{地点描述}"
+      备注: ""
+  事件:
+    {开局事件}:
+      状态: "进行中"
+      阶段: "起"
+      地点: "{开局地点}"
+      参与者: ["{角色A}"]
+      摘要: "{当前冲突}"
+      结果: ""
+      备注: ""
 ---
 [前情提要：简述进入本场景前的关键剧情节点，帮助 LLM 理解上下文，3-5 句即可]
 
@@ -894,29 +912,75 @@ python scripts/generate_sillytavern.py
 
 ### 4.4 导入 SillyTavern
 
-1. World Info → Import World → 选择世界书.json
-2. Characters → Import Character → 选择叙事者.json
-3. 选中叙事者角色 → 设置 → Character Lore → 关联世界书
+1. 安装并启用 JS-Slash-Runner / 酒馆助手扩展。
+2. World Info → Import World → 选择世界书.json。
+3. Characters → Import Character → 选择叙事者.json。
+4. 选中叙事者角色 → 设置 → Character Lore → 关联世界书。
+5. 不要安装旧版外置“角色状态管理”脚本；角色卡已携带 MVU、ZOD 与悬浮面板。
+
+### 4.5 MVU 数据流
+
+```text
+预设场景 state ──→ 首条消息 <UpdateVariable> 完整快照 ─┐
+自定义开局 ────→ 首轮根据用户输入创建快照 ─────┘
+                                                        ↓
+stat_data.{世界,人物,物品,地点,事件}
+  → 世界书注入 <status_current_variables>
+  → LLM 输出 <StateCheck>（正文前，只读）
+  → 正文
+  → LLM 输出 <UpdateVariable>（正文后，JSON Patch）
+  → MVU 本地解析 + ZOD 校验
+  → 悬浮面板订阅最新楼层，分页展示五个集合
+```
+
+大块 UI 不在聊天楼层逐条渲染；三条轻量正则隐藏 `<StateCheck>` 和 `<UpdateVariable>`。检查、正文和变量更新共用一次 LLM 调用。
+
+运行时系统条目固定收敛为三条：
+
+| 条目 | 状态 | 职责 |
+|---|---|---|
+| `[mvu_protocol]生命周期协议` | 常驻 | 开局、前检、正文后更新和输出格式的唯一规则 |
+| `[mvu_current]变量列表` | 常驻 | 只提供当前 `stat_data`，不包含行为指令 |
+| `[initvar]` | 禁用 | 仅供 MVU 初始化读取，不进入普通提示词 |
+
+叙事视角是创作策划决策，不是 MVU 运行时状态。模板不生成视角世界书条目；选定的固定视角只写入 `style_instructions`。
+
+### 4.6 状态集合预设思路
+
+| 集合 | 解决的问题 | 权威字段 | 不应保存 |
+|------|-----------|-----------|-----------|
+| 世界 | 当前叙事上下文 | 场景、时间、当前地点、天气、回合 | 所有历史剧情 |
+| 人物 | 谁在哪里、正在做什么、以什么阶段表现 | 在场、所在地点、状态、目标、关系、数值 | 完整人设和长期传记 |
+| 物品 | 物品是否已知、归谁、剩余多少 | 持有者、所在地点、数量、状态 | 持有者反向背包列表 |
+| 地点 | 地点本身是否发现、是否受损或封锁 | 已发现、状态、描述 | 当前人物/物品列表 |
+| 事件 | 剧情线是否触发、处于哪个叙事阶段 | 状态、阶段、参与者、摘要、结果 | 每轮正文摘要、与阶段重复的百分比进度 |
+
+预设只追踪“后续回合会用到、且可能变化”的事实。世界书的静态设定和角色档案仍然保存完整资料，不复制到 `stat_data`。
 
 ---
 
 ## 5. 进阶配置
 
-### 5.1 添加新维度
+### 5.1 添加新人物数值
 
-在`dimensions`列表中添加：
+在 `state_model.character_metrics` 列表中添加：
 
 ```yaml
-dimensions:
-  - id: "new_dim"
-    name: "新维度名"
-    description: "新维度描述"
-    ranges: [0, 25, 50, 75, 100]
-    stages:
-      - "阶段4"    # 76-100
-      - "阶段3"    # 51-75
-      - "阶段2"    # 26-50
-      - "阶段1"    # 0-25
+state_model:
+  character_metrics:
+    - id: "new_dim"
+      name: "新数值名"
+      description: "新数值描述"
+      initial: 0
+      change:
+        minor: [1, 2]
+        major: [3, 5]
+      ranges: [0, 25, 50, 75, 100]
+      stages:
+        - "阶段4"    # 75 ≤ x ≤ 100
+        - "阶段3"    # 50 ≤ x < 75
+        - "阶段2"    # 25 ≤ x < 50
+        - "阶段1"    # 0 ≤ x < 25
 ```
 
 所有已生成的`_stages.{json|yaml}`需要更新以包含新维度。
@@ -951,7 +1015,6 @@ entry_types:
     depth: 4
     position: 0
     constant: false
-    selective: true
     ignore_budget: true
 ```
 
@@ -1003,63 +1066,38 @@ MBTI: INFJ（提倡者）
 
 ```json
 {
-  "name": "character_states",
-  "characters": [
-    {
-      "name": "示例角色",
-      "states": [
-        {
-          "name": "维度一",
-          "ranges": [
-            {"min": 0, "max": 30, "content": "**典型行为**: 冷漠抗拒。**心理活动**: 内心羞耻"},
-            {"min": 31, "max": 70, "content": "**典型行为**: 开始配合但保持距离。**心理活动**: 自我说服"},
-            {"min": 71, "max": 100, "content": "**典型行为**: 主动靠近。**关键目标**: 证明自身价值"}
-          ]
-        },
-        {
-          "name": "维度二",
-          "ranges": [
-            {"min": 0, "max": 30, "content": "**行为描写**: 身体僵硬，本能抗拒"},
-            {"min": 31, "max": 70, "content": "**行为描写**: 开始响应，但表情冷淡"},
-            {"min": 71, "max": 100, "content": "**行为描写**: 完全开放。**关键状态**: 形成独特行为模式"}
-          ]
-        }
-      ]
+  "metrics": {
+    "affection": {
+      "生死相托": "主动维护主角的利益，愿意承担不可逆代价。",
+      "主动亲近": "主动分享信息和寻求共同经历。",
+      "初步信任": "愿意合作，但仍保留个人底线。",
+      "陌生戒备": "保持距离，只根据可验证行为判断主角。"
+    },
+    "corruption": {
+      "彻底失控": "行为被异化目标主导，难以维持原有底线。",
+      "显著异化": "出现稳定异常倾向，但仍能进行有限自控。",
+      "稳定": "维持原本人格和行为习惯。"
     }
-  ]
+  }
 }
 ```
 
 **YAML 格式**（`stages_format: "yaml"`）：
 
 ```yaml
-name: character_states
-characters:
-  - name: 示例角色
-    states:
-      - name: 维度一
-        ranges:
-          - min: 0
-            max: 30
-            content: "**典型行为**: 冷漠抗拒。**心理活动**: 内心羞耻"
-          - min: 31
-            max: 70
-            content: "**典型行为**: 开始配合但保持距离。**心理活动**: 自我说服"
-          - min: 71
-            max: 100
-            content: "**典型行为**: 主动靠近。**关键目标**: 证明自身价值"
-      - name: 维度二
-        ranges:
-          - min: 0
-            max: 30
-            content: "**行为描写**: 身体僵硬，本能抗拒"
-          - min: 31
-            max: 70
-            content: "**行为描写**: 开始响应，但表情冷淡"
-          - min: 71
-            max: 100
-            content: "**行为描写**: 完全开放。**关键状态**: 形成独特行为模式"
+metrics:
+  affection:
+    生死相托: "主动维护主角的利益，愿意承担不可逆代价。"
+    主动亲近: "主动分享信息和寻求共同经历。"
+    初步信任: "愿意合作，但仍保留个人底线。"
+    陌生戒备: "保持距离，只根据可验证行为判断主角。"
+  corruption:
+    彻底失控: "行为被异化目标主导，难以维持原有底线。"
+    显著异化: "出现稳定异常倾向，但仍能进行有限自控。"
+    稳定: "维持原本人格和行为习惯。"
 ```
+
+数值边界与阶段顺序只在 `state_model.character_metrics` 定义一次。阶段文件只补充“该角色在这个阶段如何表现”，文件名已经确定角色，不再重复角色名。
 
 ### C. 常见错误排查
 
@@ -1069,6 +1107,7 @@ characters:
 | 找不到角色文件 | 目录路径错误 | 检查`character_generation.output_dir` |
 | JSON格式错误 | `_stages.json`语法问题 | 使用在线JSON校验器检查 |
 | YAML格式错误 | `_stages.yaml`语法问题 | 检查缩进、冒号后空格 |
+| 阶段规则不匹配 | `_stages` 重复定义边界或缺少阶段 | 只保留 `metrics → id → 阶段名 → 行为`，阶段名以 `character_metrics` 为准 |
 | 世界书导入失败 | JSON结构错误 | 检查`entry_types`配置是否完整 |
 | 角色卡无响应 | system_prompt格式问题 | 检查`narrator.persona`换行符 |
 
