@@ -1,5 +1,8 @@
 import json
 import shutil
+import subprocess
+
+import yaml
 import sys
 import tempfile
 import unittest
@@ -13,9 +16,6 @@ from scripts.generate_sillytavern import SillyTavernGenerator  # noqa: E402
 
 
 CONFIG = r'''
-## 2. 配置区
-
-```yaml
 project:
   name: "测试作品"
   version: "3.0.0"
@@ -97,6 +97,10 @@ mvu:
   max_entities_per_turn: 5
   max_active_events: 2
   preflight_max_words: 60
+  preflight_checks:
+    - "事实一致性：检查测试事实"
+    - "行动可行性：检查测试资源"
+    - "因果裁决：选择最小处理"
   update_analysis_max_words: 80
   panel:
     enabled: true
@@ -108,6 +112,9 @@ character_generation:
   output_dir: "literature/characters"
   stages_format: "json"
 entry_types:
+  style:
+    enabled: false
+    source_file: "literature/fanfic/风格样本.txt"
   protagonist:
     prefix: ""
     order_start: 100
@@ -144,12 +151,7 @@ narrator:
   description: "测试"
   personality: "测试"
   creator: "test"
-  example_dialogue_file: "literature/fanfic/示例对话.txt"
-  style_instructions: "保持简洁。"
   persona: "你是测试叙事者。"
-```
-
-## 3. 工作流步骤
 '''
 
 
@@ -157,15 +159,10 @@ class GeneratorMvuTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
-        (self.root / "AGENTS.md").write_text(CONFIG, encoding="utf-8")
+        (self.root / "config.yaml").write_text(CONFIG, encoding="utf-8")
         (self.root / "literature/characters").mkdir(parents=True)
         (self.root / "literature/scenarios").mkdir(parents=True)
         (self.root / "literature/fanfic").mkdir(parents=True)
-        (self.root / "templates/mvu").mkdir(parents=True)
-        shutil.copy(
-            PROJECT_ROOT / "templates/mvu/floating_panel.js",
-            self.root / "templates/mvu/floating_panel.js",
-        )
 
         (self.root / "literature/characters/林青.md").write_text(
             "名称: 林青\n性格: 克制\n",
@@ -186,7 +183,7 @@ class GeneratorMvuTests(unittest.TestCase):
             json.dumps(stages, ensure_ascii=False),
             encoding="utf-8",
         )
-        (self.root / "literature/fanfic/示例对话.txt").write_text(
+        (self.root / "literature/fanfic/风格样本.txt").write_text(
             "【这只是正文标题】\n它属于文风样本，不是世界设定。\n",
             encoding="utf-8",
         )
@@ -238,6 +235,86 @@ state:
     def tearDown(self):
         self.tempdir.cleanup()
 
+    def run_cli(self, script, *args):
+        return subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "scripts" / script), *args],
+            cwd=self.root, capture_output=True, text=True,
+        )
+
+    def test_cli_keeps_same_named_works_and_shared_template_independent(self):
+        # Both works deliberately use the same project name and filenames.
+        works = self.root / "works"
+        for name in ("甲作品", "乙作品"):
+            work = works / name
+            shutil.copytree(self.root / "literature", work / "literature")
+            (work / "config.yaml").write_text(
+                CONFIG.replace('source_files: []', 'source_files: ["literature/fanfic/*.txt"]'),
+                encoding="utf-8",
+            )
+            (work / "literature/fanfic/设定.txt").write_text(
+                f"【{name}专属】（{name}）\n{name}的独有规则。", encoding="utf-8",
+            )
+        first_output = None
+        for name, other in (("甲作品", "乙作品"), ("乙作品", "甲作品")):
+            result = self.run_cli("generate_sillytavern.py", "--work", f"works/{name}")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = works / name / "output"
+            self.assertEqual(
+                {p.name for p in output.iterdir()},
+                {"测试作品世界书.json", "测试作品叙事者.json", "悬浮状态栏.json"},
+            )
+            book = (output / "测试作品世界书.json").read_text(encoding="utf-8")
+            self.assertIn(f"{name}专属", book)
+            self.assertNotIn(f"{other}专属", book)
+            card = json.loads((output / "测试作品叙事者.json").read_text(encoding="utf-8"))
+            self.assertIn("MVU 悬浮状态面板", str(card))
+            self.assertFalse((works / name / "templates").exists())
+            if name == "甲作品":
+                first_output = book
+        self.assertEqual(
+            (works / "甲作品/output/测试作品世界书.json").read_text(encoding="utf-8"),
+            first_output,
+        )
+
+    def test_conversion_only_changes_selected_work_and_preserves_data(self):
+        work = self.root / "另一作品"
+        shutil.copytree(self.root / "literature", work / "literature")
+        (work / "config.yaml").write_text(CONFIG, encoding="utf-8")
+        source = work / "literature/characters/林青_stages.json"
+        original = json.loads(source.read_text(encoding="utf-8"))
+        args = ("yaml", "--work", str(work))
+        preview = self.run_cli("convert_stages_format.py", *args, "--dry-run")
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertTrue(source.exists())
+        self.assertFalse(source.with_suffix(".yaml").exists())
+        self.assertEqual((work / "config.yaml").read_text(encoding="utf-8"), CONFIG)
+        result = self.run_cli("convert_stages_format.py", *args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(source.exists())
+        self.assertEqual(yaml.safe_load(source.with_suffix(".yaml").read_text(encoding="utf-8")), original)
+        config = yaml.safe_load((work / "config.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(config["character_generation"]["stages_format"], "yaml")
+        self.assertEqual((self.root / "config.yaml").read_text(encoding="utf-8"), CONFIG)
+        self.assertTrue((self.root / "literature/characters/林青_stages.json").exists())
+        generated = self.run_cli("generate_sillytavern.py", "--work", str(work))
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+
+    def test_cli_requires_work_and_bad_config_does_not_convert_files(self):
+        for script, args in (("generate_sillytavern.py", ()), ("convert_stages_format.py", ("yaml",))):
+            result = self.run_cli(script, *args)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--work", result.stderr)
+        (self.root / "config.yaml").write_text("state_model: [\n", encoding="utf-8")
+        result = self.run_cli("convert_stages_format.py", "yaml", "--work", ".")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("config.yaml", result.stderr)
+        self.assertTrue((self.root / "literature/characters/林青_stages.json").exists())
+        self.assertFalse((self.root / "literature/characters/林青_stages.yaml").exists())
+        result = self.run_cli("generate_sillytavern.py", "--work", ".")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("config.yaml", result.stderr)
+        self.assertIn("line 2", result.stderr)
+
     def test_scenario_initializes_all_state_collections(self):
         scenario = self.generator.load_scenarios()[0]["body"]
         self.assertIn("<UpdateVariable>", scenario)
@@ -276,7 +353,7 @@ state:
         self.assertNotIn("iframe", scripts[2]["content"].lower())
         self.assertEqual(len(extensions["regex_scripts"]), 3)
         self.assertIn("StateCheck", extensions["regex_scripts"][1]["findRegex"])
-        self.assertEqual(card["data"]["post_history_instructions"], "保持简洁。")
+        self.assertEqual(card["data"]["post_history_instructions"], "")
 
     def test_lorebook_contains_mvu_protocol(self):
         lorebook = self.generator.generate_lorebook()
@@ -300,6 +377,13 @@ state:
         )
         self.assertIn("开局创建规则", protocol)
         self.assertIn("正文前一致性检查", protocol)
+        self.assertIn("事实一致性：检查测试事实", protocol)
+        self.assertIn("行动可行性：检查测试资源", protocol)
+        self.assertIn("因果裁决：选择最小处理", protocol)
+        self.assertIn("proceed、constrain、reframe、reject", protocol)
+        self.assertIn("最小事实提交批次", protocol)
+        self.assertIn("用户请求但正文未发生", protocol)
+        self.assertIn("move 使用 op/from/to", protocol)
         self.assertIn("MVU 每轮输出格式", protocol)
         self.assertTrue(by_comment["[initvar]"]["disable"])
         self.assertIn("已初始化: false", by_comment["[initvar]"]["content"])
@@ -309,6 +393,30 @@ state:
         serialized = json.dumps(lorebook, ensure_ascii=False)
         self.assertNotIn("_.set(", serialized)
         self.assertNotIn("/世界/视角", serialized)
+        self.assertNotIn("审理人格", serialized)
+        self.assertNotIn("<logic_check>", serialized)
+
+    def test_preflight_checks_must_be_exactly_three_non_empty_strings(self):
+        broken_config = CONFIG.replace(
+            '  preflight_checks:\n'
+            '    - "事实一致性：检查测试事实"\n'
+            '    - "行动可行性：检查测试资源"\n'
+            '    - "因果裁决：选择最小处理"\n',
+            '  preflight_checks: "不是列表"\n',
+            1,
+        )
+        (self.root / "config.yaml").write_text(broken_config, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "mvu\\.preflight_checks"):
+            SillyTavernGenerator(str(self.root))
+
+        broken_config = CONFIG.replace(
+            '    - "因果裁决：选择最小处理"\n',
+            '',
+            1,
+        )
+        (self.root / "config.yaml").write_text(broken_config, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "exactly three"):
+            SillyTavernGenerator(str(self.root))
 
     def test_removed_pov_config_is_rejected(self):
         broken_config = CONFIG.replace(
@@ -317,7 +425,7 @@ state:
             "  relationship:\n",
             1,
         )
-        (self.root / "AGENTS.md").write_text(broken_config, encoding="utf-8")
+        (self.root / "config.yaml").write_text(broken_config, encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "entry_types\\.pov has been removed"):
             SillyTavernGenerator(str(self.root))
 
@@ -332,7 +440,7 @@ state:
 
     def test_invalid_change_range_is_rejected_before_generation(self):
         broken_config = CONFIG.replace("minor: [1, 2]", "minor: [3, 1]", 1)
-        (self.root / "AGENTS.md").write_text(broken_config, encoding="utf-8")
+        (self.root / "config.yaml").write_text(broken_config, encoding="utf-8")
         with self.assertRaisesRegex(ValueError, r"change\.minor"):
             SillyTavernGenerator(str(self.root))
 
@@ -381,6 +489,49 @@ state:
         ]
         comments = [entry["comment"] for entry in self.generator.extract_setting_entries(0)]
         self.assertNotIn("这只是正文标题", comments)
+
+    def test_style_is_disabled_lorebook_entry_and_preserves_complete_sample(self):
+        sample = "第一段。\n\n  保留缩进。\n【只是样本文字】\n" + "长句。" * 1500 + "\n"
+        (self.root / "literature/fanfic/风格样本.txt").write_text(sample, encoding="utf-8")
+        book = self.generator.generate_lorebook()
+        entries = [e for e in book['entries'].values() if e['comment'] == '[style]风格样本']
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(entries[0]['disable'])
+        self.assertTrue(entries[0]['constant'])
+        self.assertFalse(entries[0]['ignoreBudget'])
+        self.assertEqual(entries[0]['content'], sample)
+        card = self.generator.generate_narrator_card(book)['data']
+        self.assertEqual(card['description'], '测试')
+        self.assertEqual(card['post_history_instructions'], '')
+        self.assertFalse(next(e for e in card['character_book']['entries'] if e['comment'] == '[style]风格样本')['enabled'])
+        self.generator.entry_types['style']['enabled'] = True
+        self.assertFalse(self.generator.extract_style_entries(0)[0]['disable'])
+
+    def test_style_missing_or_empty_is_optional_unless_enabled(self):
+        path = self.root / 'literature/fanfic/风格样本.txt'
+        path.unlink()
+        self.assertEqual(self.generator.extract_style_entries(0), [])
+        self.generator.entry_types['style']['enabled'] = True
+        with self.assertRaisesRegex(ValueError, 'no nonempty style sample'):
+            self.generator.extract_style_entries(0)
+        path.write_text(' \n\n', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'no nonempty style sample'):
+            self.generator.extract_style_entries(0)
+
+    def test_style_follows_package_selection_and_excludes_generic_scan(self):
+        from scripts.content_packages import ContentPackages
+        for name in ('active', 'inactive'):
+            directory = self.root / f'packs/{name}/literature/fanfic'
+            directory.mkdir(parents=True)
+            (directory / '风格样本.txt').write_text(f'【{name}样本】\n{name}', encoding='utf-8')
+        self.generator.content = ContentPackages(self.root, {
+            'enabled': ['active'], 'packages': {'active': {'root': 'packs/active'}, 'inactive': {'root': 'packs/inactive'}},
+        })
+        self.generator.entry_types['setting']['source_files'] = ['**/*.txt']
+        entry = self.generator.extract_style_entries(0)[0]
+        self.assertIn('active样本', entry['content'])
+        self.assertNotIn('inactive样本', entry['content'])
+        self.assertEqual(self.generator.extract_setting_entries(1), [])
 
     def test_setting_build_includes_only_active_content_layer(self):
         common = self.root / "literature/fanfic/common.txt"

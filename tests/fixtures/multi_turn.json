@@ -1,0 +1,23 @@
+{
+  "initial": {"世界":{"回合":0,"冷却":0,"选择":"","见过":[],"历史":[],"消息":[]},"人物":{"甲":{"成长":0,"资源":5}},"事件":{"任务":{"阶段":"开始","状态":"进行中","结果":""}}},
+  "rules": {
+    "transitions":[{"path":"/事件/*/阶段","allowed":{"开始":["处理"],"处理":["结束"],"结束":[]}}],
+    "growth":[{"path":"/人物/*/成长","max_per_tick":2}],
+    "constraints":[{"for_each":"/人物/*","when":[{"path":"/人物/*/成长","op":"changed"}],"require":[{"path":"/人物/*/资源","op":"gte","value":1,"source":"before"}],"message":"成长需要资源"}],
+    "encounters":{"cooldown_path":"/世界/冷却","selected_path":"/世界/选择","seen_path":"/世界/见过","cooldown_turns":2,"candidates":[{"id":"visit","when":[{"path":"/人物/甲/资源","op":"gte","value":2}]},{"id":"trade"}]},
+    "archives":[{"collection":"/事件","status_field":"状态","terminal_states":["已完成"],"summary_fields":["结果"],"target":"/世界/历史","max_entries":2}],
+    "retention":[{"path":"/世界/消息","max_items":2}]
+  },
+  "turns":[
+    {"patch":[{"op":"delta","path":"/世界/回合","value":1},{"op":"delta","path":"/人物/甲/成长","value":2},{"op":"replace","path":"/世界/选择","value":"visit"},{"op":"replace","path":"/事件/任务/阶段","value":"处理"}],"expect":{"/世界/冷却":2,"/世界/见过":["visit"]}},
+    {"patch":[{"op":"delta","path":"/世界/回合","value":1},{"op":"replace","path":"/世界/选择","value":"trade"}],"accept":false,"expect":{"/世界/回合":1,"/世界/冷却":2}},
+    {"patch":[{"op":"delta","path":"/人物/甲/成长","value":1}],"accept":false,"expect":{"/人物/甲/成长":2}},
+    {"patch":[{"op":"delta","path":"/世界/回合","value":1},{"op":"replace","path":"/事件/任务/阶段","value":"开始"}],"accept":false},
+    {"patch":[{"op":"delta","path":"/世界/回合","value":1},{"op":"replace","path":"/事件/任务/阶段","value":"结束"},{"op":"replace","path":"/事件/任务/状态","value":"已完成"},{"op":"replace","path":"/事件/任务/结果","value":"信息已确认"},{"op":"replace","path":"/世界/消息","value":["旧","中","新"]}],"expect":{"/世界/冷却":1,"/世界/消息":["中","新"],"/世界/历史":[]}},
+    {"patch":[{"op":"delta","path":"/世界/回合","value":1}],"expect":{"/世界/冷却":0,"/事件":{},"/世界/历史":[{"name":"任务","结果":"信息已确认"}]}},
+    {"patch":[{"op":"delta","path":"/世界/回合","value":1},{"op":"replace","path":"/世界/选择","value":"trade"}],"expect":{"/世界/见过":["visit","trade"],"/世界/冷却":2}},
+    {"patch":[{"op":"delta","path":"/世界/回合","value":3},{"op":"replace","path":"/世界/选择","value":""}],"expect":{"/世界/冷却":0}},
+    {"patch":[{"op":"delta","path":"/世界/回合","value":1},{"op":"replace","path":"/世界/选择","value":"visit"}],"accept":false},
+    {"patch":[{"op":"delta","path":"/世界/回合","value":-1}],"accept":false}
+  ]
+}

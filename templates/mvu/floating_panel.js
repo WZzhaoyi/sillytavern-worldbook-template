@@ -2,7 +2,9 @@
 (() => {
   "use strict";
 
+  __MVU_RULES_SOURCE__
   const CONFIG = __MVU_PANEL_CONFIG__;
+  const subscriptions = [];
   const RUNTIME_KEY = "__sillyTavernWorldbookMvuPanel";
   const ROOT_ID = "st-worldbook-mvu-panel";
   const hostWindow = (() => {
@@ -103,6 +105,10 @@
       .fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg,#527ba4,#91c5f2); }
       .number { min-width: 32px; color: #dce7f3; font: 11px/1 ui-monospace,monospace; text-align: right; }
       .stage { grid-column: 2 / 4; color: #71869b; font-size: 10px; }
+      input, select, .action { width: 100%; padding: 9px; margin: 5px 0; color: #dce7f3; background: #172536; border: 1px solid #527ba4; border-radius: 6px; }
+      .action { cursor: pointer; }
+      .error { color: #ffa9a9; white-space: pre-wrap; }
+      details { margin: 6px 0; }
       .empty { padding: 40px 20px; color: #71869b; text-align: center; }
       @media (max-width: 600px) {
         .launcher { right: 12px; bottom: 76px; }
@@ -150,7 +156,7 @@
     if (field.type === "boolean") return value ? "是" : "否";
     if (field.type === "string_list") return Array.isArray(value) && value.length ? value.join("、") : "—";
     if (value === "" || value === null || value === undefined) return "—";
-    return String(value);
+    return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
   }
 
   function appendMetricRows(card, values) {
@@ -173,6 +179,16 @@
     for (const [fieldName, field] of Object.entries(collection.fields || {})) {
       if (field.panel === false) continue;
       const value = record?.[fieldName] ?? field.default;
+      if (['object', 'array', 'record'].includes(field.type)) {
+        const details = hostDocument.createElement('details');
+        const summary = hostDocument.createElement('summary');
+        summary.textContent = fieldName;
+        details.append(summary);
+        if (field.type === 'object') appendFields(details, field, value);
+        else for (const [key, item] of Object.entries(value || {})) appendFields(details, {fields:{[key]:field.items}}, {[key]:item});
+        card.append(details);
+        continue;
+      }
       if (field.type === "metrics") {
         appendMetricRows(card, value);
         continue;
@@ -184,9 +200,102 @@
     }
   }
 
+  function stageDraft(text) {
+    const input = hostDocument.querySelector('#send_textarea');
+    if (!input) throw Error('未找到酒馆输入框，请复制下方内容。');
+    if (input.value.trim()) throw Error('输入框已有草稿，请先保存或清空。');
+    input.value = text;
+    input.dispatchEvent(new hostWindow.Event('input', {bubbles:true}));
+    input.focus();
+  }
+
+  function action(label, fn) {
+    const button = hostDocument.createElement('button');
+    button.type = 'button'; button.className = 'action'; button.textContent = label;
+    button.addEventListener('click', fn); return button;
+  }
+
+  function renderOpening() {
+    if (latestState?.世界?.已初始化) {
+      content.append(element('empty', '当前聊天已初始化，请新建聊天后创建开局。')); return;
+    }
+    const form = hostDocument.createElement('form');
+    const inputs = new Map();
+    const initial = JSON.parse(JSON.stringify(CONFIG.opening.state));
+    for (const field of CONFIG.opening.fields) {
+      const label = hostDocument.createElement('label'); label.textContent = field.label || field.path;
+      const input = hostDocument.createElement(field.type === 'select' ? 'select' : 'input');
+      if (field.type !== 'select') { input.type = field.type === 'number' ? 'number' : 'text'; if (input.type === 'number') input.step = 'any'; }
+      if (field.type === 'select') for (const [index, choice] of field.options.entries()) {
+        const option = hostDocument.createElement('option'); option.value = String(index); option.textContent = choice.label || String(choice.value); input.append(option);
+      }
+      const value = WorldbookRules.get(initial, field.path);
+      input.value = field.type === 'select' ? String(field.options.findIndex(option => JSON.stringify(option.value) === JSON.stringify(value))) : (value ?? '');
+      input.required = field.required !== false;
+      input.id = `opening-field-${inputs.size}`; label.htmlFor = input.id;
+      form.append(label, input); inputs.set(field.path, input);
+    }
+    const error = element('error');
+    const preview = hostDocument.createElement('textarea'); preview.className = 'action'; preview.readOnly = true; preview.rows = 8;
+    const snapshot = () => {
+      const state = JSON.parse(JSON.stringify(initial));
+      for (const field of CONFIG.opening.fields) {
+        const input = inputs.get(field.path);
+        const value = field.type === 'select' ? field.options[Number(input.value)]?.value : field.type === 'number' ? Number(input.value) : input.value;
+        if (value !== undefined) WorldbookRules.set(state, field.path, value);
+      }
+      return state;
+    };
+    const refreshOptions = () => {
+      const state = snapshot();
+      for (const field of CONFIG.opening.fields.filter(field => field.type === 'select')) {
+        const input = inputs.get(field.path);
+        [...input.options].forEach((option, i) => { option.disabled = !(field.options[i].when || []).every(test => WorldbookRules.condition(test, state)); });
+      }
+      preview.value = ''; error.textContent = '';
+    };
+    form.addEventListener('input', refreshOptions); refreshOptions();
+    const submit = hostDocument.createElement('button'); submit.type = 'submit'; submit.className = 'action'; submit.textContent = '校验并填入开局草稿';
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      if (latestState?.世界?.已初始化) { error.textContent = '当前聊天已初始化'; return; }
+      const state = snapshot();
+      const errors = WorldbookRules.validate(state, CONFIG.collections, CONFIG.metrics);
+      for (const field of CONFIG.opening.fields) {
+        const input = inputs.get(field.path);
+        if (input.required && !input.value.trim()) errors.push(`${field.label}: 必填`);
+        if (field.type === 'select' && (!input.selectedOptions.length || input.selectedOptions[0].disabled)) errors.push(`${field.label}: 选项不满足条件`);
+      }
+      if (errors.length) { error.textContent = errors.join('\n'); return; }
+      const draft = '请基于以下完整开局快照开始叙事，并按初始化协议写入 stat_data；不要创建常驻世界书条目。\n' + JSON.stringify(state, null, 2);
+      preview.value = draft;
+      try { stageDraft(draft); error.textContent = '已填入草稿，发送后才开始。'; } catch (err) { error.textContent = String(err.message); }
+    });
+    form.append(submit, error, preview); content.append(form);
+  }
+
+  function renderRules() {
+    const runtime = hostWindow.__worldbookRulesRuntime;
+    content.append(element('error', (runtime?.errors || []).join('\n')));
+    if (!runtime) content.append(element('error', '未检测到状态规则脚本；请启用角色卡中的 MVU 状态规则。'));
+    const choices = WorldbookRules.candidates(latestState, CONFIG.rules);
+    content.append(element('label', '候选只提供可选方向，不代表事件已经发生；不选择也合法。'));
+    if (!choices.length) content.append(element('empty', '暂无可用遭遇'));
+    for (const choice of choices) {
+      const card = element('card'); card.append(element('name', choice.label || choice.id), element('value', choice.text || ''));
+      const error = element('error');
+      card.append(action('填入行动草稿', () => {
+        try { stageDraft(`我想尝试以下行动：${choice.text || choice.label || choice.id}。请先检查可行性；仅正文确认遭遇发生后，将 ${CONFIG.rules.encounters.selected_path} 设为 ${JSON.stringify(choice.id)}。`); }
+        catch (err) { error.textContent = err.message; }
+      }), error); content.append(card);
+    }
+  }
+
   function renderCollection() {
     const collection = CONFIG.collections?.find((item) => item.id === activeCollectionId) || CONFIG.collections?.[0];
     content.replaceChildren();
+    if (activeCollectionId === '__opening') { renderOpening(); return; }
+    if (activeCollectionId === '__rules') { renderRules(); return; }
     if (!collection) {
       content.appendChild(element("empty", "未配置状态集合"));
       return;
@@ -212,6 +321,13 @@
 
   function renderTabs() {
     tabs.replaceChildren();
+    for (const [id, label] of [['__opening', '创建开局'], ['__rules', '规则与遭遇']]) {
+      if (id === '__opening' && !CONFIG.opening?.fields?.length) continue;
+      if (id === '__rules' && !Object.keys(CONFIG.rules || {}).length) continue;
+      const button = hostDocument.createElement('button');
+      button.type = 'button'; button.className = `tab${activeCollectionId === id ? ' active' : ''}`;
+      button.dataset.collectionId = id; button.textContent = label; tabs.append(button);
+    }
     for (const collection of CONFIG.collections || []) {
       const data = latestState?.[collection.path] || {};
       const count = collection.kind === "singleton" ? 1 : Object.keys(data).length;
@@ -235,7 +351,7 @@
     if (!active || !mvu) return;
     const snapshot = latestSnapshot();
     let signature;
-    try { signature = JSON.stringify(snapshot.variables?.stat_data || {}); } catch { signature = String(Date.now()); }
+    try { signature = JSON.stringify([snapshot.variables?.stat_data || {}, hostWindow.__worldbookRulesRuntime?.errors]); } catch { signature = String(Date.now()); }
     if (!force && signature === lastSignature) return;
     lastSignature = signature;
     render(snapshot.variables, snapshot.messageId);
@@ -258,11 +374,14 @@
       if (!active) return;
       active = false;
       if (timer !== null) hostWindow.clearInterval(timer);
+      for (const [event, fn] of subscriptions) locate('eventOff')?.(event, fn);
+      window.removeEventListener('pagehide', runtime.destroy);
       root.remove();
       try { delete hostWindow[RUNTIME_KEY]; } catch { hostWindow[RUNTIME_KEY] = null; }
     },
   };
   hostWindow[RUNTIME_KEY] = runtime;
+  window.addEventListener('pagehide', runtime.destroy, {once:true});
 
   resolveMvu().then((resolved) => {
     if (!active) return;
@@ -275,6 +394,9 @@
     timer = hostWindow.setInterval(() => refresh(false), 1500);
     const eventOn = locate("eventOn");
     const eventName = mvu.events?.VARIABLE_UPDATE_ENDED;
-    if (typeof eventOn === "function" && eventName) eventOn(eventName, () => refresh(true));
+    if (typeof eventOn === "function" && eventName) {
+      const handler = () => { if (active) refresh(true); };
+      eventOn(eventName, handler); subscriptions.push([eventName, handler]);
+    }
   });
 })();

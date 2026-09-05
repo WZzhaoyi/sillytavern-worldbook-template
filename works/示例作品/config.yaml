@@ -1,0 +1,273 @@
+# =============================================================================
+# 作品元数据
+# =============================================================================
+project:
+  name: "{作品名}"
+  version: "1.0.0"
+  description: "{一句话描述你的作品}"
+
+# =============================================================================
+# MVU 状态模型（唯一事实源）
+# 世界为单例；人物、物品、地点、事件为按名称索引的实体集合。
+# 不要在两个集合里重复保存同一事实：人物位置写在人物，物品归属写在物品。
+# =============================================================================
+state_model:
+  character_metrics:
+    - id: "affection"
+      name: "好感"
+      description: "人物对主角的信任与亲近程度"
+      initial: 0
+      change:
+        minor: [1, 2]
+        major: [3, 5]
+      ranges: [0, 25, 50, 75, 100]
+      stages:
+        - "生死相托"
+        - "主动亲近"
+        - "初步信任"
+        - "陌生戒备"
+
+    - id: "corruption"
+      name: "异化"
+      description: "角色受超自然力量或负面影响改变的程度"
+      initial: 0
+      change:
+        minor: [1, 2]
+        major: [3, 5]
+      ranges: [0, 30, 60, 100]
+      stages:
+        - "彻底失控"
+        - "显著异化"
+        - "稳定"
+
+  collections:
+    world:
+      path: "世界"
+      label: "世界"
+      kind: "singleton"
+      fields:
+        已初始化: {type: "boolean", default: false, panel: false}
+        回合: {type: "number", default: 0, min: 0}
+        场景: {type: "string", default: "未初始化"}
+        场景摘要: {type: "string", default: ""}
+        时间: {type: "string", default: "未设定"}
+        当前地点: {type: "string", default: "未设定"}
+        天气: {type: "string", default: "未设定"}
+
+    characters:
+      path: "人物"
+      label: "人物"
+      kind: "collection"
+      fields:
+        在场: {type: "boolean", default: false}
+        所在地点: {type: "string", default: ""}
+        状态: {type: "string_list", default: []}
+        当前目标: {type: "string", default: ""}
+        关系: {type: "string", default: ""}
+        数值: {type: "metrics", default: {}}
+        备注: {type: "string", default: ""}
+
+    items:
+      path: "物品"
+      label: "物品"
+      kind: "collection"
+      fields:
+        已知: {type: "boolean", default: false}
+        持有者: {type: "string", default: ""}
+        所在地点: {type: "string", default: ""}
+        数量: {type: "number", default: 1, min: 0}
+        状态: {type: "string", default: "完好"}
+        描述: {type: "string", default: ""}
+        备注: {type: "string", default: ""}
+
+    locations:
+      path: "地点"
+      label: "地点"
+      kind: "collection"
+      fields:
+        已发现: {type: "boolean", default: false}
+        状态: {type: "string", default: "正常"}
+        描述: {type: "string", default: ""}
+        备注: {type: "string", default: ""}
+
+    events:
+      path: "事件"
+      label: "事件"
+      kind: "collection"
+      fields:
+        状态: {type: "enum", default: "未触发", values: ["未触发", "进行中", "已完成", "已失败", "已搁置"]}
+        阶段: {type: "enum", default: "起", values: ["起", "承", "转", "合"]}
+        地点: {type: "string", default: ""}
+        参与者: {type: "string_list", default: []}
+        摘要: {type: "string", default: ""}
+        结果: {type: "string", default: ""}
+        备注: {type: "string", default: ""}
+
+# =============================================================================
+# MVU 运行时配置
+# 生成的角色卡会自动携带 MVU、ZOD Schema、隐藏变量块正则和无 iframe 悬浮面板。
+# 运行时状态统一保存于 stat_data，不再依赖 _.set 或外置角色状态管理脚本。
+# =============================================================================
+mvu:
+  runtime_url: "https://testingcf.jsdelivr.net/gh/NLKASHEI/MVU-offline@v1.0.2/mvu_bundle_full.js"
+  schema_helper_url: "https://testingcf.jsdelivr.net/gh/StageDog/tavern_resource/dist/util/mvu_zod.js"
+  max_characters_per_turn: 3
+  max_entities_per_turn: 6
+  max_active_events: 3
+  preflight_max_words: 100
+  # 正文前审查是同一次回复内的三个职责，不是三个角色、Agent 或 API 调用。
+  # 保留通用三级结构，并把每项替换为本作最关键的可观察约束；不要扩成逐轮穷举清单。
+  preflight_checks:
+    - "事实一致性：核对时间、地点、在场实体、物品归属、事件阶段与当前变量，不从旧聊天重新累计状态"
+    - "行动可行性：核对能力、资源、知识来源、地理可达性、人物动机与玩家控制权"
+    - "因果裁决：在 proceed、constrain、reframe、reject 中选择最小必要处理，优先保留用户意图并落实合理代价"
+  update_analysis_max_words: 120
+  panel:
+    enabled: true
+    title: "{作品名} · 世界状态"
+    width: 840
+
+# =============================================================================
+# 路径配置
+# =============================================================================
+paths:
+  scenarios_dir: "literature/scenarios"
+  output_dir: "output"
+
+# =============================================================================
+# 角色生成配置（Agent使用）
+# =============================================================================
+character_generation:
+  # 角色档案输出目录（脚本从此目录扫描 .md 和 _stages.{format}）
+  output_dir: "literature/characters"
+
+  # 阶段数据文件格式："json" 或 "yaml"（选定后统一使用，不可混用）
+  stages_format: "json"
+
+  # Agent提取参考（正则表达式，仅供Agent生成角色档案时参考，脚本不使用）
+  extract_patterns:
+    aliases: '【名称】\s*{name}[\(（]([^\)）]+)[\)）]'
+    appearance: '(?:容貌|外貌|相貌|容颜)[：:](.*?)(?=\n\n|\n【|$)'
+    personality: '(?:性格|性情)[：:](.*?)(?=\n\n|\n【|$)'
+    relationships: '(?:与.+?的关系|情感)[：:](.*?)(?=\n\n|\n【|$)'
+
+# =============================================================================
+# 输出配置
+# =============================================================================
+entry_types:
+  # 普通文本整体成为一个风格条目，不按【标题】拆分，不截断段落。
+  # 文件不存在时不生成；存在时默认以禁用条目导出。
+  style:
+    enabled: false
+    source_file: "literature/fanfic/风格样本.txt"
+
+  # 角色类型判定规则：
+  # - 存在同名 {角色名}_stages.json / .yaml / .yml → 主角组 protagonist
+  # - 不存在同名阶段数据文件 → 配角组 supporting
+  # 主角组
+  protagonist:
+    prefix: ""
+    order_start: 100
+    order_step: 1
+    depth: 4
+    position: 0
+    constant: false
+    ignore_budget: true
+
+  # 配角组
+  supporting:
+    prefix: "配角_"
+    order_start: 200
+    order_step: 1
+    depth: 5
+    position: 0
+    constant: false
+    ignore_budget: false
+
+  # 设定条目（世界观、剧情指导等）
+  # source_files: 设定文件扫描路径（glob模式），文件内必须为【标题】(关键词) 格式
+  # active_layer/layers: 可选的构建时互斥内容层。公共设定始终扫描，只额外扫描当前层。
+  # 例：active_layer: "前期"，layers: {前期: ["literature/fanfic/layers/early/*.txt"], 后期: [...]}
+  # 标题前加 ★（如 ★【世界观】）表示常驻上下文，忽略关键词强制注入；否则走关键词触发
+  # 不要包含原著正文路径（会被当作设定条目错误解析）
+  setting:
+    prefix: ""
+    order_start: 50
+    order_step: 1
+    depth: 2
+    position: 0
+    constant: false
+    ignore_budget: false
+    source_files:
+      - "literature/fanfic/*.txt"
+    active_layer: ""
+    layers: {}
+
+  # 关系网
+  relationship:
+    prefix: "关系_"
+    order_start: 300
+    order_step: 1
+    depth: 6
+    position: 0
+    constant: false
+    ignore_budget: false
+    source_file: "literature/fanfic/关系网.txt"
+
+# =============================================================================
+# SillyTavern字段默认值
+# =============================================================================
+sillytavern_defaults:
+  entry:
+    probability: 100
+    use_probability: true
+    delay: 0
+    cooldown: 0
+    sticky: 0
+    vectorized: false
+    exclude_recursion: true
+    prevent_recursion: false
+    add_memo: true
+    scan_depth: 2
+    selective_logic: 0        # AND ANY；关系条目要求主关键词 + 任一可选过滤键
+
+  narrator:
+    spec: "chara_card_v3"
+    spec_version: "3.0"
+    depth: 4
+
+# =============================================================================
+# 叙事者配置（用于生成角色卡）
+# 以下为模板，请根据作品替换内容
+#
+# description → 卡片简介；persona → 叙事身份、固定视角和叙事原则。
+# 可选风格样本由 entry_types.style 单独写入世界书，默认禁用。
+# =============================================================================
+narrator:
+  name: "{作品名}"
+  description: "《{作品名}》的叙事者。"
+  personality: "{叙事者的性格特征，如：擅长角色言行和场景刻画}"
+  creator: "{创作者名称}"
+  persona: >
+    你是《{作品名}》的叙事者。本作是{一句话作品类型与基调，如：古典武侠悲剧 / 末世废土生存 / 现代都市悬疑}。
+
+    固定叙事视角：{选择本作视角与可感知范围}。
+
+    【叙事原则】
+    - {主线与暗线的安排}
+    - {节奏把控原则}
+    - {伏笔与悬念的处理}
+
+
+# =============================================================================
+# 可选通用能力（空配置不启用；具体字段与示例见 AGENTS.md 第 7 节）
+# 内容包目录沿用作品的 literature/... 布局，依赖先于依赖者加载。
+# =============================================================================
+content:
+  enabled: []
+  packages: {}
+imports:
+  entries: []
+  scripts: []
+opening: {}
+runtime_rules: {}

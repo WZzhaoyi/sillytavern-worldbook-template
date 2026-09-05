@@ -5,7 +5,9 @@ SillyTavern 世界书和角色卡生成器
 版本: 3.0.0 (MVU lifecycle)
 """
 
+import argparse
 import json
+import math
 import re
 import sys
 import uuid
@@ -14,6 +16,18 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Any, Tuple
 from datetime import datetime
+
+if __package__:
+    from .content_packages import ContentPackages
+else:
+    from content_packages import ContentPackages
+
+
+DEFAULT_PREFLIGHT_CHECKS = [
+    "事实一致性：核对时间、地点、在场实体、物品归属、事件阶段与当前变量，不从旧聊天重新累计状态",
+    "行动可行性：核对能力、资源、知识来源、地理可达性、人物动机与玩家控制权",
+    "因果裁决：在 proceed、constrain、reframe、reject 中选择最小必要处理，优先保留用户意图并落实合理代价",
+]
 
 
 class IndentedSafeDumper(yaml.SafeDumper):
@@ -24,68 +38,23 @@ class IndentedSafeDumper(yaml.SafeDumper):
 
 
 class ConfigLoader:
-    """从AGENTS.md加载YAML配置"""
+    """读取作品目录中的独立 YAML 配置。"""
 
     @staticmethod
     def load_config(project_root: Path) -> Dict[str, Any]:
-        agents_file = project_root / "AGENTS.md"
-        if not agents_file.exists():
-            raise FileNotFoundError(f"AGENTS.md not found")
-
-        with open(agents_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        pattern = r'##\s*2\.\s*配置区.*?^(```yaml\s*\n(.*?)^```)\s*(?:---\s*)?##\s*3\.'
-        match = re.search(pattern, content, re.DOTALL | re.IGNORECASE | re.MULTILINE)
-        if not match:
-            raise ValueError("Cannot extract config from AGENTS.md")
-
-        yaml_text = match.group(2)
-        yaml_start_line = content[:match.start(2)].count('\n') + 1
-
+        config_file = project_root / "config.yaml"
         try:
-            return yaml.safe_load(yaml_text)
-        except yaml.YAMLError as e:
-            raise ValueError(ConfigLoader._format_yaml_error(e, yaml_text, yaml_start_line))
-
-    @staticmethod
-    def _format_yaml_error(err: yaml.YAMLError, yaml_text: str, yaml_start_line: int) -> str:
-        header = "YAML 解析失败——AGENTS.md 第 2 节配置区格式错误"
-        problem = getattr(err, 'problem', None) or str(err)
-        mark = getattr(err, 'problem_mark', None) or getattr(err, 'context_mark', None)
-
-        if mark is None:
-            return f"{header}\n  原因: {problem}\n  提示: 请对照 AGENTS.md 第 2 节「🔒 LLM 修改守则」逐条检查。"
-
-        rel_line = mark.line
-        col = mark.column
-        abs_line = yaml_start_line + rel_line
-
-        lines = yaml_text.split('\n')
-        start = max(0, rel_line - 3)
-        end = min(len(lines), rel_line + 4)
-        width = len(str(yaml_start_line + end))
-
-        ctx_lines = []
-        for i in range(start, end):
-            marker = '>>' if i == rel_line else '  '
-            ctx_lines.append(f"    {marker} {str(yaml_start_line + i).rjust(width)} | {lines[i]}")
-            if i == rel_line:
-                ctx_lines.append(f"    {'  '} {' ' * width} | {' ' * col}^")
-
-        context = '\n'.join(ctx_lines)
-        return (
-            f"{header}\n"
-            f"  位置: AGENTS.md 第 {abs_line} 行，第 {col + 1} 列\n"
-            f"  原因: {problem}\n"
-            f"  上下文:\n{context}\n"
-            f"  提示: 请对照 AGENTS.md 第 2 节「🔒 LLM 修改守则」逐条检查（缩进、冒号后空格、stages/ranges 长度等）。"
-        )
+            config = yaml.safe_load(config_file.read_text(encoding='utf-8'))
+        except yaml.YAMLError as exc:
+            raise ValueError(f"YAML 解析失败: {config_file}\n{exc}") from exc
+        if not isinstance(config, dict):
+            raise ValueError(f"{config_file} must contain a YAML mapping")
+        return config
 
 
 class SillyTavernGenerator:
     def __init__(self, project_root: str):
-        self.project_root = Path(project_root)
+        self.project_root = Path(project_root).resolve()
         self.config = ConfigLoader.load_config(self.project_root)
 
         paths = self.config.get('paths', {})
@@ -101,12 +70,20 @@ class SillyTavernGenerator:
         self.mvu_config = self.config.get('mvu') or {}
         self.entry_types = self.config.get('entry_types', {})
         self.silly_defaults = self.config.get('sillytavern_defaults', {})
-        self.narrator_config = self.config.get('narrator', {})
+        self.preflight_checks = self._load_preflight_checks()
+        self.content = ContentPackages(self.project_root, self.config.get('content'))
+        self.character_files = {}
+        for path in self.content.files([str(Path(char_gen.get('output_dir', 'literature/characters')) / '*.md')]):
+            if path.stem in self.character_files:
+                raise ValueError(f'Duplicate character across selected packages: {path.stem}')
+            self.character_files[path.stem] = path
+        if self.content.selected and self.entry_types.get('setting', {}).get('active_layer'):
+            raise ValueError('Use content packages or legacy active_layer, not both')
 
         if 'pov' in self.entry_types:
             raise ValueError(
                 "entry_types.pov has been removed; choose one fixed narrative viewpoint "
-                "and write it in narrator.style_instructions"
+                "and write it in narrator.persona"
             )
         
         # 阶段数据文件格式：json 或 yaml（选定后统一使用，不可混用）
@@ -116,6 +93,127 @@ class SillyTavernGenerator:
 
         self._validate_state_model()
         self._build_initial_state()
+        self._validate_features()
+
+    def _field_at_path(self, path):
+        if not isinstance(path, str) or not path.startswith('/'):
+            raise ValueError(f'Expected JSON pointer: {path}')
+        keys = [key.replace('~1', '/').replace('~0', '~') for key in path[1:].split('/')]
+        if any(key in ('__proto__', 'constructor', 'prototype') for key in keys):
+            raise ValueError(f'Unsafe path: {path}')
+        root = {'type': 'object', 'fields': {
+            c['path']: {'type': 'object', 'fields': c['fields']} if c['kind'] == 'singleton'
+            else {'type': 'record', 'items': {'type': 'object', 'fields': c['fields']}}
+            for c in self.collections.values()
+        }}
+        field = root
+        for key in keys:
+            if field['type'] == 'object':
+                if key not in field['fields']:
+                    raise ValueError(f'Unknown schema path: {path}')
+                field = field['fields'][key]
+            elif field['type'] in ('array', 'record'):
+                field = field['items']
+            elif field['type'] == 'metrics':
+                metric = self._metric_by_id(key)
+                field = {'type': 'number', 'min': metric['ranges'][0], 'max': metric['ranges'][-1]}
+            else:
+                raise ValueError(f'Path descends into scalar: {path}')
+        return field
+
+    def _validate_features(self):
+        rules = self.config.get('runtime_rules') or {}
+        self._field_at_path(rules.get('clock_path', '/世界/回合'))
+        def condition(test):
+            self._field_at_path(test['path'])
+            if 'value_path' in test:
+                self._field_at_path(test['value_path'])
+            if test.get('op', 'eq') not in ('eq', 'ne', 'gte', 'lte', 'gt', 'lt', 'in', 'contains', 'exists', 'changed'):
+                raise ValueError(f'Unknown condition operator: {test}')
+        for rule in rules.get('transitions', []):
+            field = self._field_at_path(rule['path'])
+            values = field.get('values', [])
+            if field['type'] != 'enum' or any(k not in values or any(v not in values for v in dest) for k, dest in rule['allowed'].items()):
+                raise ValueError('Transitions must reference enum values')
+        for rule in rules.get('constraints', []):
+            if rule.get('for_each'):
+                self._field_at_path(rule['for_each'])
+            for test in rule.get('when', []) + rule.get('require', []):
+                condition(test)
+        for rule in rules.get('growth', []):
+            if self._field_at_path(rule['path'])['type'] != 'number' or rule['max_per_tick'] < 0:
+                raise ValueError('Growth requires numeric path and nonnegative max_per_tick')
+            self._field_at_path(rule.get('clock_path', rules.get('clock_path', '/世界/回合')))
+        for rule in rules.get('retention', []):
+            if self._field_at_path(rule['path'])['type'] not in ('array', 'string_list') or rule['max_items'] < 1:
+                raise ValueError('Retention requires array and positive max_items')
+        for rule in rules.get('archives', []):
+            source = self._field_at_path(rule['collection'])
+            target = self._field_at_path(rule['target'])
+            if source['type'] != 'record' or target['type'] != 'array' or rule['max_entries'] < 1:
+                raise ValueError('Archives require collection, array target and positive max_entries')
+            fields = source['items']['fields']
+            for name in [rule['status_field']] + rule['summary_fields']:
+                if name not in fields:
+                    raise ValueError(f'Unknown archive field: {name}')
+            if not set(rule['terminal_states']) <= set(fields[rule['status_field']].get('values', [])):
+                raise ValueError('Unknown archive terminal state')
+        encounter = rules.get('encounters')
+        if encounter:
+            for name, kind in [('cooldown_path', 'number'), ('seen_path', 'string_list'), ('selected_path', 'string')]:
+                if self._field_at_path(encounter[name])['type'] != kind:
+                    raise ValueError(f'encounters.{name} must point to {kind}')
+            if encounter['cooldown_turns'] < 0:
+                raise ValueError('Encounter cooldown must be nonnegative')
+            ids = [c['id'] for c in encounter.get('candidates', [])]
+            if len(ids) != len(set(ids)) or any(not value for value in ids):
+                raise ValueError('Encounter ids must be unique and nonempty')
+            for candidate in encounter.get('candidates', []):
+                for test in candidate.get('when', []):
+                    condition(test)
+        opening = self.config.get('opening') or {}
+        seen = set()
+        for field in opening.get('fields', []):
+            target = self._field_at_path(field['path'])
+            if '*' in field['path'] or field['path'] in seen:
+                raise ValueError('Opening fields need unique concrete paths')
+            seen.add(field['path'])
+            if field.get('type', 'text') not in ('text', 'number', 'select'):
+                raise ValueError('Opening field type must be text, number or select')
+            if field.get('type') == 'number' and target['type'] != 'number':
+                raise ValueError('Opening number input requires numeric schema')
+            if field.get('type') == 'select' and not field.get('options'):
+                raise ValueError('Opening select requires options')
+            for option in field.get('options', []):
+                self._normalize_field_value(target, option['value'], field['path'])
+                for test in option.get('when', []):
+                    condition(test)
+        if opening:
+            self._build_initial_state({'state': opening.get('state', {})}, Path('custom'))
+
+    def _runtime_payload(self):
+        return {
+            'rules': self.config.get('runtime_rules') or {},
+            'collections': list(self.collections.values()), 'metrics': self.metrics,
+        }
+
+    def _build_rules_script(self):
+        directory = Path(__file__).resolve().parents[1] / 'templates/mvu'
+        return (directory / 'rules.js').read_text(encoding='utf-8') + '\n' + (directory / 'guard.js').read_text(encoding='utf-8').replace(
+            '__MVU_RULES_CONFIG__', json.dumps(self._runtime_payload(), ensure_ascii=False))
+
+    def _load_preflight_checks(self) -> List[str]:
+        raw_checks = self.mvu_config.get('preflight_checks', DEFAULT_PREFLIGHT_CHECKS)
+        if not isinstance(raw_checks, list) or len(raw_checks) != 3:
+            raise ValueError("mvu.preflight_checks must contain exactly three strings")
+        checks = []
+        for index, check in enumerate(raw_checks):
+            if not isinstance(check, str) or not check.strip():
+                raise ValueError(
+                    f"mvu.preflight_checks[{index}] must be a non-empty string"
+                )
+            checks.append(check.strip())
+        return checks
 
     def _validate_state_model(self) -> None:
         """Validate the sole-source-of-truth schema before emitting MVU artifacts."""
@@ -146,7 +244,7 @@ class SillyTavernGenerator:
             '事件': {'状态', '阶段'},
         }
 
-        allowed_types = {"string", "number", "boolean", "string_list", "enum", "metrics"}
+        allowed_types = {"string", "number", "boolean", "string_list", "enum", "metrics", "object", "array", "record"}
         for collection_id, collection in self.collections.items():
             if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', str(collection_id)):
                 raise ValueError(f"Invalid collection id: {collection_id!r}")
@@ -175,6 +273,7 @@ class SillyTavernGenerator:
                     raise ValueError(
                         f"Collection {collection_id}.{field_name} has an unsupported field type"
                     )
+                self._validate_field(field, f'{collection_id}.{field_name}')
                 if field.get('type') == 'enum':
                     values = field.get('values')
                     if not isinstance(values, list) or not values or field.get('default') not in values:
@@ -236,13 +335,30 @@ class SillyTavernGenerator:
             seen_ids.add(dim_id)
             seen_names.add(name)
 
+    def _validate_field(self, field, context):
+        kind = field.get('type')
+        if kind == 'object':
+            if not isinstance(field.get('fields'), dict):
+                raise ValueError(f'{context}.fields must be a mapping')
+            for name, child in field['fields'].items():
+                self._validate_field(child, f'{context}.{name}')
+        elif kind in ('array', 'record'):
+            if not isinstance(field.get('items'), dict):
+                raise ValueError(f'{context}.items must describe values')
+            self._validate_field(field['items'], f'{context}.items')
+            if 'max_items' in field and (not isinstance(field['max_items'], int) or field['max_items'] < 1):
+                raise ValueError(f'{context}.max_items must be positive')
+        elif kind not in ('string', 'number', 'boolean', 'enum', 'string_list', 'metrics'):
+            raise ValueError(f'Unsupported field type: {context}')
+        self._normalize_field_value(field, field.get('default'), context)
+
     def find_stages_file(self, char_name: str) -> Tuple[Path, str]:
-        preferred_file = self.characters_dir / f"{char_name}_stages.{self.stages_format}"
+        preferred_file = self.character_files.get(char_name, self.characters_dir / f"{char_name}.md").parent / f"{char_name}_stages.{self.stages_format}"
         if preferred_file.exists():
             return preferred_file, self.stages_format
 
         for stages_format, suffix in (("json", ".json"), ("yaml", ".yaml"), ("yaml", ".yml")):
-            stages_file = self.characters_dir / f"{char_name}_stages{suffix}"
+            stages_file = self.character_files.get(char_name, self.characters_dir / f"{char_name}.md").parent / f"{char_name}_stages{suffix}"
             if stages_file.exists():
                 return stages_file, stages_format
 
@@ -322,7 +438,7 @@ class SillyTavernGenerator:
         })
 
     def merge_character_files(self, char_name: str, entry_type: str = "protagonist") -> str:
-        md_file = self.characters_dir / f"{char_name}.md"
+        md_file = self.character_files.get(char_name, self.characters_dir / f"{char_name}.md")
         stages_file, stages_format = self.find_stages_file(char_name)
 
         if not md_file.exists():
@@ -388,16 +504,13 @@ class SillyTavernGenerator:
 
     def has_character_stages(self, char_name: str) -> bool:
         return any(
-            (self.characters_dir / f"{char_name}_stages{suffix}").exists()
+            (self.character_files.get(char_name, self.characters_dir / f"{char_name}.md").parent / f"{char_name}_stages{suffix}").exists()
             for suffix in (".json", ".yaml", ".yml")
         )
 
     def discover_characters(self) -> List[Tuple[str, str]]:
-        if not self.characters_dir.exists():
-            return []
         chars = []
-        for md_file in self.characters_dir.glob("*.md"):
-            char_name = md_file.stem
+        for char_name in self.character_files:
             entry_type = "protagonist" if self.has_character_stages(char_name) else "supporting"
             chars.append((char_name, entry_type))
         return sorted(chars)
@@ -408,7 +521,7 @@ class SillyTavernGenerator:
 
         content = self.merge_character_files(char_name, entry_type)
         keys = [char_name]
-        md_path = self.characters_dir / f"{char_name}.md"
+        md_path = self.character_files.get(char_name, self.characters_dir / f"{char_name}.md")
         if md_path.exists():
             first_line = md_path.read_text(encoding='utf-8').split('\n', 1)[0]
             alias_match = re.search(r'[（(]([^）)]+)[）)]', first_line)
@@ -451,10 +564,7 @@ class SillyTavernGenerator:
         for et_config in self.entry_types.values():
             sf = et_config.get('source_file')
             if sf:
-                dedicated.add((self.project_root / sf).resolve())
-        example_file = self.narrator_config.get('example_dialogue_file')
-        if example_file:
-            dedicated.add((self.project_root / example_file).resolve())
+                dedicated.update(self.content.files([sf]))
         return dedicated
 
     def extract_setting_entries(self, start_id: int) -> List[Dict[str, Any]]:
@@ -484,69 +594,61 @@ class SillyTavernGenerator:
         dedicated_files = self._collect_dedicated_source_files()
         seen_setting_files = set()
 
-        for source_pattern in source_files:
-            source_dir = self.project_root / Path(source_pattern).parent
-            source_glob = Path(source_pattern).name
-
-            if not source_dir.exists():
+        for settings_file in self.content.files(source_files):
+            resolved_file = settings_file.resolve()
+            if resolved_file in dedicated_files or resolved_file in seen_setting_files:
                 continue
+            seen_setting_files.add(resolved_file)
+            with open(settings_file, 'r', encoding='utf-8') as f:
+                content = f.read()
 
-            for settings_file in source_dir.glob(source_glob):
-                resolved_file = settings_file.resolve()
-                if resolved_file in dedicated_files or resolved_file in seen_setting_files:
+            header_pattern = r'(★?)【([^】]+)】(?:[（(]([^）)]+)[）)])?'
+            headers = list(re.finditer(header_pattern, content))
+
+            for idx, match in enumerate(headers):
+                is_constant = bool(match.group(1))
+                name = match.group(2).strip()
+                keywords_text = match.group(3)
+
+                if not name:
                     continue
-                seen_setting_files.add(resolved_file)
-                with open(settings_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
 
-                header_pattern = r'(★?)【([^】]+)】(?:[（(]([^）)]+)[）)])?'
-                headers = list(re.finditer(header_pattern, content))
+                keys = [k.strip() for k in re.split(r'[，,、]', keywords_text) if k.strip()] if keywords_text else [name]
 
-                for idx, match in enumerate(headers):
-                    is_constant = bool(match.group(1))
-                    name = match.group(2).strip()
-                    keywords_text = match.group(3)
+                start_pos = match.end()
+                end_pos = headers[idx + 1].start() if idx + 1 < len(headers) else len(content)
+                setting_content = content[start_pos:end_pos].strip()
 
-                    if not name:
-                        continue
+                if not setting_content:
+                    continue
 
-                    keys = [k.strip() for k in re.split(r'[，,、]', keywords_text) if k.strip()] if keywords_text else [name]
+                order = type_config.get('order_start', 50) + len(entries) * type_config.get('order_step', 1)
 
-                    start_pos = match.end()
-                    end_pos = headers[idx + 1].start() if idx + 1 < len(headers) else len(content)
-                    setting_content = content[start_pos:end_pos].strip()
-
-                    if not setting_content:
-                        continue
-
-                    order = type_config.get('order_start', 50) + len(entries) * type_config.get('order_step', 1)
-
-                    entries.append({
-                        "uid": start_id + len(entries),
-                        "key": keys,
-                        "keysecondary": [],
-                        "comment": f"{type_config.get('prefix', '')}{name}",
-                        "content": f"### {name}\n\n{setting_content}",
-                        "constant": is_constant or type_config.get('constant', False),
-                        "selective": False,
-                        "selectiveLogic": defaults.get('selective_logic', 0),
-                        "addMemo": defaults.get('add_memo', True),
-                        "order": order,
-                        "position": type_config.get('position', 0),
-                        "disable": False,
-                        "probability": defaults.get('probability', 100),
-                        "useProbability": defaults.get('use_probability', True),
-                        "depth": type_config.get('depth', 2),
-                        "delay": defaults.get('delay', 0),
-                        "cooldown": defaults.get('cooldown', 0),
-                        "sticky": defaults.get('sticky', 0),
-                        "scanDepth": defaults.get('scan_depth', 2),
-                        "vectorized": defaults.get('vectorized', False),
-                        "ignoreBudget": type_config.get('ignore_budget', True),
-                        "excludeRecursion": defaults.get('exclude_recursion', False),
-                        "preventRecursion": defaults.get('prevent_recursion', False)
-                    })
-
+                entries.append({
+                    "uid": start_id + len(entries),
+                    "key": keys,
+                    "keysecondary": [],
+                    "comment": f"{type_config.get('prefix', '')}{name}",
+                    "content": f"### {name}\n\n{setting_content}",
+                    "constant": is_constant or type_config.get('constant', False),
+                    "selective": False,
+                    "selectiveLogic": defaults.get('selective_logic', 0),
+                    "addMemo": defaults.get('add_memo', True),
+                    "order": order,
+                    "position": type_config.get('position', 0),
+                    "disable": False,
+                    "probability": defaults.get('probability', 100),
+                    "useProbability": defaults.get('use_probability', True),
+                    "depth": type_config.get('depth', 2),
+                    "delay": defaults.get('delay', 0),
+                    "cooldown": defaults.get('cooldown', 0),
+                    "sticky": defaults.get('sticky', 0),
+                    "scanDepth": defaults.get('scan_depth', 2),
+                    "vectorized": defaults.get('vectorized', False),
+                    "ignoreBudget": type_config.get('ignore_budget', True),
+                    "excludeRecursion": defaults.get('exclude_recursion', False),
+                    "preventRecursion": defaults.get('prevent_recursion', False)
+                })
         return entries
 
     def extract_relationship_entries(self, start_id: int) -> List[Dict[str, Any]]:
@@ -557,9 +659,15 @@ class SillyTavernGenerator:
         source_file = type_config.get('source_file')
         if not source_file:
             return []
-        relationship_file = self.project_root / source_file
-        if not relationship_file.exists():
-            return []
+        entries = []
+        for relationship_file in self.content.files([source_file]):
+            entries.extend(self._parse_relationship_file(relationship_file, start_id + len(entries)))
+        return entries
+
+    def _parse_relationship_file(self, relationship_file, start_id):
+        entries = []
+        type_config = self.get_entry_type_config('relationship')
+        defaults = self.silly_defaults.get('entry', {})
 
         with open(relationship_file, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -609,23 +717,26 @@ class SillyTavernGenerator:
 
         return entries
 
-    def extract_example_dialogue(self) -> str:
-        narrator = self.config.get('narrator', {})
-        example_path = narrator.get('example_dialogue_file')
-        if not example_path:
-            return ""
-        example_file = self.project_root / example_path
-        if not example_file.exists():
-            return ""
-
-        max_length = narrator.get('example_dialogue_max_length', 4000)
-
-        with open(example_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        lines = content.split('\n')
-        cleaned_lines = [line.strip() for line in lines if line.strip()]
-        return '\n'.join(cleaned_lines)[:max_length]
+    def extract_style_entries(self, start_id: int) -> List[Dict[str, Any]]:
+        config = self.entry_types.get('style') or {}
+        enabled = config.get('enabled', False)
+        if not isinstance(enabled, bool):
+            raise ValueError('entry_types.style.enabled must be a boolean')
+        source = config.get('source_file')
+        files = list(self.content.files([source])) if source else []
+        samples = [path.read_text(encoding='utf-8') for path in files]
+        samples = [sample for sample in samples if sample.strip()]
+        if not samples:
+            if enabled:
+                raise ValueError('Style is enabled but no nonempty style sample was found')
+            return []
+        entry = self._make_system_entry(
+            start_id, '[style]风格样本', '\n\n'.join(samples), 40, disabled=not enabled,
+        )
+        # A disabled constant entry can be enabled directly in the lorebook UI.
+        entry['constant'] = True
+        entry['ignoreBudget'] = False
+        return [entry]
 
     def _metric_by_id(self, key: str) -> Dict[str, Any]:
         normalized = str(key).strip()
@@ -633,7 +744,7 @@ class SillyTavernGenerator:
             if normalized == metric['id']:
                 return metric
         raise ValueError(
-            f"Unknown character metric id {normalized!r}; use an id declared in AGENTS.md"
+            f"Unknown character metric id {normalized!r}; use an id declared in config.yaml"
         )
 
     def _normalize_metrics(self, raw_value: Any, context: str) -> Dict[str, Any]:
@@ -661,6 +772,17 @@ class SillyTavernGenerator:
         field_type = field['type']
         if value is None:
             value = deepcopy(field.get('default'))
+        if field_type == 'object':
+            return self._normalize_record(value, field, context)
+        if field_type in ('array', 'record'):
+            value = value if value is not None else ([] if field_type == 'array' else {})
+            if not isinstance(value, list if field_type == 'array' else dict):
+                raise ValueError(f'{context} must be {field_type}')
+            if len(value) > field.get('max_items', float('inf')):
+                raise ValueError(f'{context} exceeds max_items')
+            if field_type == 'array':
+                return [self._normalize_field_value(field['items'], item, f'{context}[{i}]') for i, item in enumerate(value)]
+            return {key: self._normalize_field_value(field['items'], item, f'{context}.{key}') for key, item in value.items()}
         if field_type == 'metrics':
             return self._normalize_metrics(value, context)
         if field_type == 'string':
@@ -684,6 +806,8 @@ class SillyTavernGenerator:
                 number = float(value)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"{context} must be numeric") from exc
+            if not math.isfinite(number):
+                raise ValueError(f'{context} must be finite')
             if 'min' in field:
                 number = max(float(field['min']), number)
             if 'max' in field:
@@ -807,7 +931,7 @@ class SillyTavernGenerator:
         if 'pov' in metadata:
             raise ValueError(
                 f"Scenario {file_path.name}: pov frontmatter has been removed; "
-                "use the fixed viewpoint in narrator.style_instructions"
+                "use the fixed viewpoint in narrator.persona"
             )
 
         body += self._build_scenario_mvu_init(metadata, file_path)
@@ -819,10 +943,9 @@ class SillyTavernGenerator:
         }
 
     def load_scenarios(self) -> List[dict]:
-        if not self.scenarios_dir.exists():
-            return []
         scenarios = []
-        for file_path in sorted(self.scenarios_dir.glob("*.md")):
+        pattern = str(Path(self.config.get('paths', {}).get('scenarios_dir', 'literature/scenarios')) / '*.md')
+        for file_path in self.content.files([pattern]):
             result = self.parse_scenario_file(file_path)
             if result['body']:
                 scenarios.append(result)
@@ -869,12 +992,20 @@ class SillyTavernGenerator:
 
     def _build_preflight_rules(self) -> str:
         max_words = int(self.mvu_config.get('preflight_max_words', 100))
+        check_lines = '\n'.join(
+            f"    {index}. {check}"
+            for index, check in enumerate(self.preflight_checks, 1)
+        )
         return f"""---
 正文前一致性检查:
   - 每次回复必须先读取 <status_current_variables>，然后输出一个不超过 {max_words} 字的 <StateCheck>。
-  - 检查当前时间、地点、在场人物、可用物品、活跃事件和人物当前数值阶段。
+  - 这是一次模型回复内的紧凑审查，不是多个角色、多个 Agent 或额外 API 调用。
+  - 依次应用下列审查职责，但只报告与本轮有关的约束和违规，不逐项展示思维过程：
+{check_lines}
   - 变量与较早的聊天叙述冲突时，以变量为准；不得从历史重新累计。
-  - 检查块只写本轮叙事约束和聚焦，不写正文，不修改变量，不预先宣布剧情结果。
+  - violations 只列实际问题；每项包含 type、issue、handling。没有问题时写空数组。
+  - verdict 只能是 proceed、constrain、reframe、reject；reject 仅用于无法转化为世界内尝试或触犯内容边界的请求。
+  - 检查块只写可观察的裁决结果，不写隐藏思维链，不修改变量，不预先宣布尚未发生的剧情结果。
   - 如 /世界/已初始化 为 false，检查块改为概括用户的开局条件与缺失项。
 """
 
@@ -914,13 +1045,17 @@ class SillyTavernGenerator:
 
   更新原则:
   - 先写完正文，再根据本轮已经发生的事实输出一个 <UpdateVariable>。
+  - <StateCheck> 约束的是“允许如何叙述”；<UpdateVariable> 只记录正文最终确认的结果。用户请求但正文未发生、被 constrain/reframe 改写或失败的预期结果不得直接写入变量。
   - 剧情回复对 /世界/回合 使用 delta +1；纯 OOC/配置说明不增加回合。
   - 每轮最多更新 {max_characters} 个人物、总计 {max_entities} 个实体；只更新本轮直接变化的实体。
-  - 新实体使用 insert 一次写入完整对象。已消耗物品、已收束事件和离场后不再影响后续的一次性人物应 remove；有持续关系、目标或后果的人物不得仅因暂时离场而删除。
+  - 把更新视为最小事实提交批次：先筛选会影响后续叙事的持久变化，再选择最少操作；不得把描写性细节、计划、推测或未完成动作写入状态。
+  - replace 用于已存在字段的新值；delta 用于可证明的数值增减；insert 用于新实体且一次写入完整对象；remove 用于已消耗或按保留策略退出的实体；move 只用于真实改名或键迁移。
+  - 同一事实涉及多个权威字段时必须放在同一提交批次，例如物品有持有者时清空其所在地点，人物跨入或离开当前场景时同步其所在地点与在场状态。
+  - 已消耗物品、已收束事件和离场后不再影响后续的一次性人物应 remove；有持续关系、目标或后果的人物不得仅因暂时离场而删除。
   - 数值变化优先使用 delta；无变化时不输出 replace 或 delta 0。
   - 人物普通互动使用轻微变化；不可逆选择、关系转折、重大创伤或成就才使用重大变化。
   - 只被提及、背景中存在、重复已有态度或模型自己推测的状态不更新。
-  - 变量路径必须来自已定义 Schema；禁止临时创建新字段。
+  - <Analysis> 只列最终变化路径及正文证据，不复述审查过程；变量路径必须来自已定义 Schema，禁止临时创建新字段。
 """
 
     def _build_mvu_output_format(self) -> str:
@@ -929,14 +1064,15 @@ class SillyTavernGenerator:
 MVU 每轮输出格式:
   rule:
   - 严格顺序：<StateCheck> → 正文 → <UpdateVariable>。三者共用同一次模型回复。
-  - <StateCheck> 使用紧凑 JSON，只包含 scene、actors、items、events、constraints、focus。
+  - <StateCheck> 使用紧凑 JSON，只包含 scene、constraints、violations、verdict、focus。
   - <Analysis> 最多 {analysis_words} 字，只列本轮实际变化的路径和原因；无变化写“无变量变化”。
   - <JSONPatch> 必须是合法 JSON 数组。无变化时输出 []。
   - path 必须以 / 开头，并与 <status_current_variables> 中的集合名、实体名、字段名完全一致。
-  - 支持 replace、delta、insert、remove、move；禁止更新以下划线开头的只读字段。
+  - replace、delta、insert 使用 op/path/value；remove 使用 op/path；move 使用 op/from/to。
+  - 这些是 MVU 支持的 JSON Patch 风格操作；禁止更新以下划线开头的只读字段。
   format: |-
     <StateCheck>
-    {{"scene":"当前场景","actors":["在场人物"],"items":[],"events":[],"constraints":[],"focus":"本轮焦点"}}
+    {{"scene":"当前场景","constraints":["本轮有效约束"],"violations":[],"verdict":"proceed","focus":"本轮焦点"}}
     </StateCheck>
 
     ${{正文}}
@@ -1002,6 +1138,7 @@ MVU 每轮输出格式:
             self._build_preflight_rules(),
             self._build_mvu_update_rules(),
             self._build_mvu_output_format(),
+            '本作可执行状态规则（只约束结果，不代表事实已发生）：\n' + json.dumps(self.config.get('runtime_rules') or {}, ensure_ascii=False),
         ])
         return [
             self._make_system_entry(
@@ -1042,6 +1179,16 @@ MVU 每轮输出格式:
         def field_expression(field: Dict[str, Any]) -> str:
             field_type = field['type']
             default = json.dumps(field.get('default'), ensure_ascii=False)
+            if field_type == 'object':
+                children = ', '.join(f'{json.dumps(k, ensure_ascii=False)}: {field_expression(v)}' for k, v in field['fields'].items())
+                return f'z.object({{{children}}}).strict().prefault({default if default != "null" else "{}"})'
+            if field_type in ('array', 'record'):
+                child = field_expression(field['items'])
+                expr = f'z.array({child})' if field_type == 'array' else f'z.record(z.string(), {child})'
+                if 'max_items' in field:
+                    expr += f'.refine(value => Object.keys(value).length <= {field["max_items"]}, "max_items exceeded")'
+                fallback = '[]' if field_type == 'array' else '{}'
+                return expr + f'.prefault({default if default != "null" else fallback})'
             if field_type == 'metrics':
                 return "CharacterMetrics.prefault({})"
             if field_type == 'string':
@@ -1123,7 +1270,7 @@ $(() => registerMvuSchema(Schema));
         }
 
     def _build_panel_script(self) -> str:
-        template_path = self.project_root / 'templates/mvu/floating_panel.js'
+        template_path = Path(__file__).resolve().parents[1] / 'templates/mvu/floating_panel.js'
         if not template_path.exists():
             raise FileNotFoundError(f"MVU panel template not found: {template_path}")
         source = template_path.read_text(encoding='utf-8')
@@ -1132,6 +1279,11 @@ $(() => registerMvuSchema(Schema));
         config = {
             "title": panel.get('title') or f"{project_name} · 世界状态",
             "width": panel.get('width', 840),
+            "rules": self.config.get('runtime_rules') or {},
+            "opening": {
+                **(self.config.get('opening') or {}),
+                'state': self._build_initial_state({'state': (self.config.get('opening') or {}).get('state', {})}, Path('custom')),
+            } if self.config.get('opening') else {},
             "collections": [
                 {
                     "id": collection_id,
@@ -1153,6 +1305,7 @@ $(() => registerMvuSchema(Schema));
                 for metric in self.metrics
             ],
         }
+        source = source.replace('__MVU_RULES_SOURCE__', (template_path.parent / 'rules.js').read_text(encoding='utf-8'))
         return source.replace(
             '__MVU_PANEL_CONFIG__',
             json.dumps(config, ensure_ascii=False),
@@ -1179,8 +1332,17 @@ $(() => registerMvuSchema(Schema));
             ),
             self._script_record("MVU Schema", self._build_zod_script()),
         ]
+        if self.config.get('runtime_rules') or self.config.get('opening'):
+            scripts.append(self._script_record("MVU 状态规则", self._build_rules_script()))
         if (self.mvu_config.get('panel') or {}).get('enabled', True):
             scripts.append(self._script_record("MVU 悬浮状态面板", self._build_panel_script()))
+        for path in self.content.files((self.config.get('imports') or {}).get('scripts', [])):
+            script = json.loads(path.read_text(encoding='utf-8'))
+            if script.get('type') != 'script' or not isinstance(script.get('content'), str) or not isinstance(script.get('id'), str) or not script['id']:
+                raise ValueError(f'Expected Tavern Helper script JSON: {path}')
+            if any(item.get('id') == script.get('id') for item in scripts):
+                raise ValueError(f'Duplicate script id: {path}')
+            scripts.append(script)
         return {"scripts": scripts, "variables": {}}
 
     def _regex_record(
@@ -1228,34 +1390,20 @@ $(() => registerMvuSchema(Schema));
             ),
         ]
 
-    def generate_narrator_card(self) -> Dict[str, Any]:
+    def generate_narrator_card(self, lorebook=None) -> Dict[str, Any]:
         project = self.config.get('project', {})
         narrator = self.config.get('narrator', {})
         defaults = self.silly_defaults.get('narrator', {})
 
         scenarios = self.load_scenarios()
-        first_mes = scenarios[0]['body'] if scenarios else ""
+        first_mes = scenarios[0]['body'] if scenarios else ('请通过悬浮状态栏的“创建开局”填写起点，或直接描述希望的开局条件。' if self.config.get('opening') else '请描述你的身份、起点与希望的开局条件。')
         alternate_greetings = [s['body'] for s in scenarios[1:]] if len(scenarios) > 1 else []
 
         metric_names = [metric['name'] for metric in self.metrics]
 
-        style_instructions = narrator.get('style_instructions', '').strip()
-        post_history = style_instructions
-
-        style_samples = self.extract_example_dialogue()
-        base_description = narrator.get('description', '')
-        if style_samples:
-            description = (
-                "以下是本作的文风参考段落，续写时应严格模仿其叙事风格、"
-                "句式和用词习惯：\n\n---\n\n"
-                f"{style_samples}\n\n---\n\n{base_description}"
-            )
-        else:
-            description = base_description
-
         data = {
             "name": narrator.get('name', '叙事者'),
-            "description": description,
+            "description": narrator.get('description', ''),
             "personality": narrator.get('personality', ''),
             "scenario": "",
             "first_mes": first_mes,
@@ -1267,7 +1415,7 @@ $(() => registerMvuSchema(Schema));
                 f"人物数值：{', '.join(metric_names)}。",
             ),
             "system_prompt": narrator.get('persona', ''),
-            "post_history_instructions": post_history,
+            "post_history_instructions": "",
             "tags": project.get('tags', []),
             "creator": narrator.get('creator', ''),
             "character_version": project.get('version', '1.0.0'),
@@ -1279,6 +1427,14 @@ $(() => registerMvuSchema(Schema));
             }
         }
 
+        if lorebook is not None:
+            data['character_book'] = {'name': f"{project.get('name', '作品')}世界书", 'entries': [
+                {**entry, 'id': entry['uid'], 'keys': entry.get('key', []),
+                 'secondary_keys': entry.get('keysecondary', []), 'enabled': not entry.get('disable', False),
+                 'insertion_order': entry.get('order', 100), 'position': 'before_char' if entry.get('position', 0) == 0 else 'after_char',
+                 'extensions': {**entry.get('extensions', {}), **entry}}
+                for entry in lorebook['entries'].values()
+            ]}
         return {
             "spec": defaults.get('spec', 'chara_card_v3'),
             "spec_version": defaults.get('spec_version', '3.0'),
@@ -1311,12 +1467,28 @@ $(() => registerMvuSchema(Schema));
         current_id += len(relationship_entries)
         print(f"  [OK] 共{len(relationship_entries)}个关系组")
 
+        style_entries = self.extract_style_entries(current_id)
+        entries.extend(style_entries)
+        current_id += len(style_entries)
+
         print("\n生成 MVU 系统条目...")
         mvu_entries = self.generate_mvu_entries(current_id)
         entries.extend(mvu_entries)
         current_id += len(mvu_entries)
         print(f"  [OK] 共{len(mvu_entries)}个 MVU 条目")
 
+        for source in self.content.files((self.config.get('imports') or {}).get('entries', [])):
+            raw = json.loads(source.read_text(encoding='utf-8'))
+            imported = raw.get('entries', [])
+            for entry in imported.values() if isinstance(imported, dict) else imported:
+                restored = deepcopy(entry)
+                restored['uid'] = len(entries)
+                entries.append(restored)
+        titles = {entry.get('comment') for entry in entries}
+        for entry in entries:
+            for reference in re.findall(r"getwi\([^,]*,\s*['\"]([^'\"]+)", entry.get('content', '')):
+                if reference not in titles:
+                    raise ValueError(f'Missing worldbook reference {reference!r} in {entry.get("comment")}')
         return {"entries": {str(e["uid"]): e for e in entries}}
 
     def save_files(self):
@@ -1335,28 +1507,12 @@ $(() => registerMvuSchema(Schema));
 
         narrator_file = self.output_dir / f"{project_name}叙事者.json"
         with open(narrator_file, 'w', encoding='utf-8') as f:
-            json.dump(self.generate_narrator_card(), f, ensure_ascii=False, indent=2)
+            json.dump(self.generate_narrator_card(lorebook), f, ensure_ascii=False, indent=2)
         print(f"[OK] 角色卡: {narrator_file}")
-
-        guide_file = self.output_dir / "使用指南.md"
-        with open(guide_file, 'w', encoding='utf-8') as f:
-            f.write(
-                f"# {project_name} 使用指南\n\n"
-                "## 文件\n"
-                f"- {project_name}世界书.json\n"
-                f"- {project_name}叙事者.json\n\n"
-                "## 导入顺序\n"
-                "1. 安装并启用 JS-Slash-Runner / 酒馆助手。\n"
-                f"2. 导入 `{project_name}世界书.json`。\n"
-                f"3. 导入 `{project_name}叙事者.json` 并关联世界书。\n"
-                "4. 角色卡已携带 MVU、ZOD Schema、隐藏变量块正则和无 iframe 悬浮面板，"
-                "不再安装旧版“角色状态管理”脚本。\n\n"
-                "## 运行时协议\n"
-                "- 预设场景首条消息或首轮自定义开局创建五集合 `stat_data` 快照。\n"
-                "- 每轮按 `<StateCheck>` → 正文 → `<UpdateVariable>` 输出，只调用一次 LLM。\n"
-                "- MVU 本地解析并经 ZOD 校验；悬浮面板实时展示世界/人物/物品/地点/事件。\n"
-            )
-        print(f"[OK] 使用指南: {guide_file}")
+        if (self.mvu_config.get('panel') or {}).get('enabled', True):
+            panel_file = self.output_dir / "悬浮状态栏.json"
+            panel_file.write_text(json.dumps(self._script_record("MVU 悬浮状态面板", self._build_panel_script()), ensure_ascii=False, indent=2), encoding='utf-8')
+            print(f"[OK] 悬浮状态栏: {panel_file}")
 
         print(f"\n{'='*60}")
         print("[OK] 所有文件生成完成！")
@@ -1364,8 +1520,10 @@ $(() => registerMvuSchema(Schema));
 
 
 def main():
-    script_dir = Path(__file__).parent
-    project_root = script_dir.parent
+    parser = argparse.ArgumentParser(description="生成指定作品的世界书与角色卡")
+    parser.add_argument("--work", required=True, type=Path, help="作品目录，如 works/示例作品；相对当前工作目录")
+    args = parser.parse_args()
+    project_root = args.work
 
     try:
         generator = SillyTavernGenerator(str(project_root))
