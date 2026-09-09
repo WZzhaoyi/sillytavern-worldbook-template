@@ -4,7 +4,7 @@
 角色阶段数据格式转换工具。
 
 在 `_stages.json` 与 `_stages.yaml` 之间批量转换，并同步更新
-AGENTS.md 配置区中的 character_generation.stages_format。
+config.yaml 中的 character_generation.stages_format。
 """
 
 import argparse
@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
+
+if __package__:
+    from .content_packages import ContentPackages
+else:
+    from content_packages import ContentPackages
 
 
 SUPPORTED_FORMATS = ("json", "yaml")
@@ -31,10 +36,6 @@ class IndentedSafeDumper(yaml.SafeDumper):
         return super().increase_indent(flow, False)
 
 
-def detect_project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Convert literature/characters/*_stages files between JSON and YAML."
@@ -44,15 +45,11 @@ def parse_args() -> argparse.Namespace:
         choices=SUPPORTED_FORMATS,
         help="目标格式：json 或 yaml",
     )
+    parser.add_argument("--work", required=True, type=Path, help="作品目录，相对当前工作目录")
     parser.add_argument(
         "--characters-dir",
         default=None,
-        help="角色目录，默认从 AGENTS.md 的 character_generation.output_dir 读取，读取失败则使用 literature/characters",
-    )
-    parser.add_argument(
-        "--agents-file",
-        default=None,
-        help="AGENTS.md 路径，默认使用项目根目录下的 AGENTS.md",
+        help="角色目录，默认从 config.yaml 的 character_generation.output_dir 读取，路径相对作品目录",
     )
     parser.add_argument(
         "--keep-source",
@@ -77,45 +74,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-config-update",
         action="store_true",
-        help="不更新 AGENTS.md 中的 character_generation.stages_format。",
+        help="不更新 config.yaml 中的 character_generation.stages_format。",
     )
     return parser.parse_args()
 
 
-def extract_config_yaml(agents_file: Path) -> Tuple[str, int, int]:
-    if not agents_file.exists():
-        raise ConversionError(f"Cannot find AGENTS.md: {agents_file}")
-
-    content = agents_file.read_text(encoding="utf-8")
-    pattern = r"##\s*2\.\s*配置区.*?^```yaml\s*\n(.*?)^```\s*(?:---\s*)?##\s*3\."
-    match = re.search(pattern, content, re.DOTALL | re.IGNORECASE | re.MULTILINE)
-    if not match:
-        raise ConversionError("Cannot extract YAML config block from AGENTS.md")
-    return content, match.start(1), match.end(1)
-
-
-def load_config(agents_file: Path) -> Dict[str, Any]:
-    content, start, end = extract_config_yaml(agents_file)
-    yaml_text = content[start:end]
+def load_config(config_file: Path) -> Dict[str, Any]:
     try:
-        return yaml.safe_load(yaml_text) or {}
-    except yaml.YAMLError as exc:
-        raise ConversionError(f"Invalid YAML config in AGENTS.md: {exc}") from exc
+        config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConversionError(f"Cannot read {config_file}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ConversionError(f"{config_file} must contain a YAML mapping")
+    return config
 
 
-def resolve_characters_dir(project_root: Path, agents_file: Path, cli_value: Optional[str]) -> Path:
-    if cli_value:
-        path = Path(cli_value)
-        return path if path.is_absolute() else project_root / path
-
-    try:
-        config = load_config(agents_file)
-    except ConversionError:
-        return project_root / "literature/characters"
-
-    char_gen = config.get("character_generation", {})
-    configured = char_gen.get("output_dir", "literature/characters")
-    path = Path(configured)
+def resolve_characters_dir(project_root: Path, config_file: Path, cli_value: Optional[str]) -> Path:
+    config = load_config(config_file)
+    configured = config.get("character_generation", {}).get("output_dir", "literature/characters")
+    path = Path(cli_value or configured)
     return path if path.is_absolute() else project_root / path
 
 
@@ -275,9 +252,8 @@ def convert_file(
     return f"{source_path} -> {target_path}"
 
 
-def update_agents_format(agents_file: Path, target_format: str, dry_run: bool) -> bool:
-    content, start, end = extract_config_yaml(agents_file)
-    yaml_text = content[start:end]
+def update_config_format(config_file: Path, target_format: str, dry_run: bool) -> bool:
+    yaml_text = config_file.read_text(encoding="utf-8")
     line_pattern = re.compile(
         r'^(\s*stages_format:\s*)(["\']?)(json|yaml)(["\']?)(\s*(?:#.*)?)$',
         re.MULTILINE,
@@ -285,7 +261,7 @@ def update_agents_format(agents_file: Path, target_format: str, dry_run: bool) -
 
     match = line_pattern.search(yaml_text)
     if not match:
-        raise ConversionError("Cannot find character_generation.stages_format in AGENTS.md config")
+        raise ConversionError("Cannot find character_generation.stages_format in config.yaml")
 
     quote = match.group(2) or match.group(4) or '"'
     replacement = f"{match.group(1)}{quote}{target_format}{quote}{match.group(5)}"
@@ -295,22 +271,27 @@ def update_agents_format(agents_file: Path, target_format: str, dry_run: bool) -
         return False
 
     if not dry_run:
-        agents_file.write_text(content[:start] + updated_yaml + content[end:], encoding="utf-8")
+        config_file.write_text(updated_yaml, encoding="utf-8")
 
     return True
 
 
 def main() -> int:
     args = parse_args()
-    project_root = detect_project_root()
-    agents_file = Path(args.agents_file) if args.agents_file else project_root / "AGENTS.md"
-    if not agents_file.is_absolute():
-        agents_file = project_root / agents_file
-
-    characters_dir = resolve_characters_dir(project_root, agents_file, args.characters_dir)
-    stage_files = list(iter_stage_files(characters_dir, args.target_format, args.repair))
+    project_root = args.work.resolve()
+    config_file = project_root / "config.yaml"
 
     try:
+        characters_dir = resolve_characters_dir(project_root, config_file, args.characters_dir)
+        if args.characters_dir:
+            stage_files = list(iter_stage_files(characters_dir, args.target_format, args.repair))
+        else:
+            config = load_config(config_file)
+            content = ContentPackages(project_root, config.get('content'))
+            directory = config.get('character_generation', {}).get('output_dir', 'literature/characters')
+            stage_files = [(path, source_format_for(path)) for path in content.files([str(Path(directory) / '*_stages.*')])
+                           if source_format_for(path) and (args.repair or source_format_for(path) != args.target_format or path.suffix == '.yml')]
+
         if not stage_files:
             print(f"No *_stages files need conversion in {characters_dir}")
         else:
@@ -327,15 +308,15 @@ def main() -> int:
                 print(result)
 
         if not args.no_config_update:
-            changed = update_agents_format(agents_file, args.target_format, args.dry_run)
+            changed = update_config_format(config_file, args.target_format, args.dry_run)
             if changed:
                 suffix = " (dry run)" if args.dry_run else ""
-                print(f"Updated {agents_file}: stages_format -> {args.target_format}{suffix}")
+                print(f"Updated {config_file}: stages_format -> {args.target_format}{suffix}")
             else:
-                print(f"{agents_file}: stages_format already {args.target_format}")
+                print(f"{config_file}: stages_format already {args.target_format}")
 
         return 0
-    except ConversionError as exc:
+    except (ConversionError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

@@ -4,12 +4,18 @@ on:
   push:
     paths:
       - 'AGENTS.md'
+      - 'works/**'
+      - 'templates/**'
+      - 'tests/**'
       - 'scripts/**'
       - 'requirements.txt'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - 'AGENTS.md'
+      - 'works/**'
+      - 'templates/**'
+      - 'tests/**'
       - 'scripts/**'
       - 'requirements.txt'
       - '.github/workflows/ci.yml'
@@ -24,16 +30,23 @@ jobs:
         with:
           python-version: '3.11'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Run tests
+        run: python -m unittest discover -s tests
+
       - name: Run generation script
-        run: python scripts/generate_sillytavern.py
+        run: python scripts/generate_sillytavern.py --work works/示例作品
 
       - name: Verify outputs
         run: |
-          for f in "output/{作品名}世界书.json" "output/{作品名}叙事者.json" "output/使用指南.md"; do
+          for f in "works/示例作品/output/{作品名}世界书.json" "works/示例作品/output/{作品名}叙事者.json" "works/示例作品/output/悬浮状态栏.json"; do
             [ -s "$f" ] || { echo "FAIL: $f missing or empty"; exit 1; }
           done
-          python -c "import json; json.load(open('output/{作品名}世界书.json', encoding='utf-8'))"
-          python -c "import json; json.load(open('output/{作品名}叙事者.json', encoding='utf-8'))"
+          python -c "import json; json.load(open('works/示例作品/output/{作品名}世界书.json', encoding='utf-8'))"
+          python -c "import json; json.load(open('works/示例作品/output/{作品名}叙事者.json', encoding='utf-8'))"

@@ -1,7 +1,6 @@
 # 输出文件（脚本生成，不纳入版本控制）
-output/*.json
-output/*.md
-!output/.gitkeep
+works/*/output/*
+!works/*/output/.gitkeep
 
 # Python
 __pycache__/
@@ -60,3 +59,6 @@ logs/
 *.sqlite
 *.sqlite3
 .alma-snapshots
+# 仅跟踪示例作品，其他作品保留在本地
+/works/*
+!/works/示例作品/
