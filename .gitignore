@@ -59,3 +59,6 @@ logs/
 *.sqlite
 *.sqlite3
 .alma-snapshots
+# 仅跟踪示例作品，其他作品保留在本地
+/works/*
+!/works/示例作品/

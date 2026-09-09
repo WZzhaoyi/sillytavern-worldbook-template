@@ -74,7 +74,7 @@ const WorldbookRules = (() => {
       case 'boolean': if (typeof value !== 'boolean') fail('must be boolean'); break;
       case 'enum': if (!field.values.includes(value)) fail('invalid enum'); break;
       case 'metrics':
-        validateNode(value, {type:'object', fields:Object.fromEntries(metrics.map(m => [m.id, {type:'number', min:m.ranges[0], max:m.ranges.at(-1)}]))}, path, errors);
+        validateNode(value, {type:'object', fields:Object.fromEntries(metrics.filter(m => !(m.exclude_entities || []).includes(path.startsWith('/人物/') ? path.split('/')[2].replace(/~1/g,'/').replace(/~0/g,'~') : null)).map(m => [m.id, {type:'number', min:m.ranges[0], max:m.ranges.at(-1)}]))}, path, errors);
         break;
       case 'object':
         if (!value || Array.isArray(value) || typeof value !== 'object') { fail('must be object'); break; }

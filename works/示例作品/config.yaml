@@ -109,6 +109,8 @@ state_model:
 # 运行时状态统一保存于 stat_data，不再依赖 _.set 或外置角色状态管理脚本。
 # =============================================================================
 mvu:
+  # 创作时为重要字段补齐正文证据与补丁操作，见 AGENTS.md 第 5 节。
+  update_rules: []
   runtime_url: "https://testingcf.jsdelivr.net/gh/NLKASHEI/MVU-offline@v1.0.2/mvu_bundle_full.js"
   schema_helper_url: "https://testingcf.jsdelivr.net/gh/StageDog/tavern_resource/dist/util/mvu_zod.js"
   max_characters_per_turn: 3

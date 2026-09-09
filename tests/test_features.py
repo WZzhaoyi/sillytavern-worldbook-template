@@ -53,6 +53,63 @@ class FeatureTests(unittest.TestCase):
         path.write_text(text, encoding='utf-8')
         return path
 
+    def test_update_rules_validate_and_reach_update_prompt(self):
+        self.config['mvu']['update_rules'] = [{'path': '/人物/*/所在地点', 'when': '已经到达', 'update': '同步在场'}]
+        generator = self.generator()
+        entries = generator.generate_lorebook()['entries'].values()
+        content = '\n'.join(e['content'] for e in entries if '[mvu_update]' in e['comment'])
+        self.assertIn('已经到达', content)
+        self.assertIn('同步在场', content)
+        self.config['mvu']['update_rules'][0]['path'] = '/人物/*/不存在'
+        with self.assertRaises(ValueError):
+            self.generator()
+
+    def test_metric_scope_normalization_and_runtime_validation(self):
+        metric = self.config['state_model']['character_metrics'][0]
+        metric['exclude_entities'] = ['主角']
+        generator = self.generator()
+        state = generator._build_initial_state({'state': {'人物': {'主角': {}, '访客': {}}}})
+        self.assertNotIn(metric['id'], state['人物']['主角']['数值'])
+        self.assertIn(metric['id'], state['人物']['访客']['数值'])
+        with self.assertRaises(ValueError):
+            generator._build_initial_state({'state': {'人物': {'主角': {'数值': {metric['id']: 0}}}}})
+        payload = self.write('scope.json', json.dumps({'state': state, 'collections': list(generator.collections.values()), 'metrics': generator.metrics}, ensure_ascii=False))
+        runner = self.write('scope.cjs', """
+const assert=require('node:assert/strict'),fs=require('node:fs');
+const rules=require(process.argv[2]), p=JSON.parse(fs.readFileSync(process.argv[3]));
+assert.deepEqual(rules.validate(p.state,p.collections,p.metrics),[]);
+const id=p.metrics[0].id;
+p.state.人物.主角.数值[id]=0;
+assert(rules.validate(p.state,p.collections,p.metrics).length);
+delete p.state.人物.主角.数值[id];delete p.state.人物.访客.数值[id];
+assert(rules.validate(p.state,p.collections,p.metrics).length);
+""")
+        result = subprocess.run(['node', str(runner), str(PROJECT_ROOT / 'templates/mvu/rules.js'), str(payload)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_opening_payload_is_pending_and_protocol_is_depth_system(self):
+        generator = self.generator()
+        script = generator._build_panel_script()
+        marker = 'const CONFIG = '
+        start = script.index(marker) + len(marker)
+        payload, _ = json.JSONDecoder().raw_decode(script[start:])
+        self.assertFalse(payload['opening']['state']['世界']['已初始化'])
+        self.assertFalse(generator._build_initial_state()['世界']['已初始化'])
+        self.assertTrue(generator._build_initial_state({}, Path('scenario'))['世界']['已初始化'])
+        card = generator.generate_narrator_card(generator.generate_lorebook())
+        self.assertEqual(card['data']['extensions']['world'], card['data']['character_book']['name'])
+        entries = card['data']['character_book']['entries']
+        self.assertTrue(any('[mvu_update]' in e['comment'] for e in entries))
+        self.assertTrue(any(e['comment'] == '合理性审查与开局' for e in entries))
+        for entry in entries:
+            if entry['comment'].startswith('[mvu_'):
+                self.assertEqual(entry['extensions']['position'], 4)
+                self.assertEqual(entry['extensions']['depth'], 0)
+                self.assertEqual(entry['extensions']['role'], 0)
+        del self.config['state_model']['collections']['world']['fields']['当前地点']
+        self.config.pop('opening')
+        self.generator()  # Scene location is an author field, not a lifecycle requirement.
+
     def test_nested_state_normalization_and_schema(self):
         generator = self.generator()
         initial = generator._build_initial_state({'state': {'世界': {'档案': {'消息': [{'内容': 'hello'}], '技能': {'观察': 2}}}}})
@@ -175,7 +232,7 @@ class FeatureTests(unittest.TestCase):
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
 const handlers = new Map();
 const host = {parent:null, console, addEventListener(){}, removeEventListener(){},
-  Mvu:{events:{VARIABLE_UPDATE_ENDED:'updated'}},
+  Mvu:{events:{VARIABLE_UPDATE_ENDED:'updated',COMMAND_PARSED:'commands'}},
   eventOn(name, fn){handlers.set(name,fn)}, eventOff(name){handlers.delete(name)}};
 host.parent=host;
 vm.runInNewContext(fs.readFileSync(process.argv[2],'utf8'), {window:host, console});
@@ -186,9 +243,28 @@ handlers.get('updated')(next,{stat_data:before});
 assert.deepEqual(JSON.parse(JSON.stringify(next.stat_data)),before);
 assert(host.__worldbookRulesRuntime.errors.length);
 const valid={stat_data:structuredClone(before)};valid.stat_data.世界.回合=1;
+valid.stat_data.$internal={display_data:structuredClone(before),delta_data:{}};
 handlers.get('updated')(valid,{stat_data:before});
 assert.equal(valid.stat_data.世界.回合,1);
 assert.equal(host.__worldbookRulesRuntime.errors.length,0);
+// Model/API output is untrusted: reject unknown commands and lifecycle resets before execution.
+for (const operation of [{op:'execute',path:'/世界/回合',value:9}, {op:'replace',path:'/世界',value:{已初始化:true,回合:9}}, {op:'delta',path:'/世界/回合',value:'9'}]) {
+ const data={stat_data:structuredClone(before)};
+ const commands=[{type:'set'}];
+ handlers.get('commands')(data,commands,'<UpdateVariable><JSONPatch>'+JSON.stringify([operation])+'</JSONPatch></UpdateVariable>');
+ assert.equal(commands.length,0);
+ handlers.get('updated')(data,{stat_data:before});
+ assert.deepEqual(JSON.parse(JSON.stringify(data.stat_data)),before);
+ assert(host.__worldbookRulesRuntime.errors.length);
+}
+const data={stat_data:structuredClone(before)}, commands=[{type:'add'}];
+handlers.get('commands')(data,commands,'<UpdateVariable><JSONPatch>[{"op":"delta","path":"/世界/回合","value":1}]</JSONPatch></UpdateVariable>');
+assert.equal(commands.length,1);
+data.stat_data.世界.回合=1;
+handlers.get('updated')(data,{stat_data:before});
+assert.equal(data.stat_data.世界.回合,1);
+assert.equal(host.__worldbookRulesRuntime.errors.length,0);
+
 host.__worldbookRulesRuntime.destroy();
 assert.equal(handlers.size,0);
 """)

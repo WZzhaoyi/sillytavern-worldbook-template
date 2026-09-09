@@ -351,7 +351,7 @@ state:
         self.assertIn("attachShadow", scripts[2]["content"])
         self.assertIn("activeCollectionId", scripts[2]["content"])
         self.assertNotIn("iframe", scripts[2]["content"].lower())
-        self.assertEqual(len(extensions["regex_scripts"]), 3)
+        self.assertEqual(len(extensions["regex_scripts"]), 4)
         self.assertIn("StateCheck", extensions["regex_scripts"][1]["findRegex"])
         self.assertEqual(card["data"]["post_history_instructions"], "")
 
@@ -359,14 +359,14 @@ state:
         lorebook = self.generator.generate_lorebook()
         entries = list(lorebook["entries"].values())
         by_comment = {entry["comment"]: entry for entry in entries}
-        self.assertIn("[mvu_protocol]生命周期协议", by_comment)
+        self.assertIn("合理性审查与开局", by_comment)
         self.assertIn("[mvu_current]变量列表", by_comment)
         self.assertNotIn("身份_模式目录", by_comment)
         self.assertEqual(
             [key for key in by_comment if key.startswith("[mvu_")],
-            ["[mvu_protocol]生命周期协议", "[mvu_current]变量列表"],
+            ["[mvu_update]变量更新", "[mvu_current]变量列表", "[mvu_update]变量输出格式"],
         )
-        protocol = by_comment["[mvu_protocol]生命周期协议"]["content"]
+        protocol = by_comment["合理性审查与开局"]["content"] + by_comment["[mvu_update]变量更新"]["content"] + by_comment["[mvu_update]变量输出格式"]["content"]
         self.assertIn(
             "同时最多维持 2 个“进行中”事件",
             protocol,
@@ -385,6 +385,11 @@ state:
         self.assertIn("用户请求但正文未发生", protocol)
         self.assertIn("move 使用 op/from/to", protocol)
         self.assertIn("MVU 每轮输出格式", protocol)
+        self.assertNotIn("额外模型解析模式", protocol)
+        self.assertNotIn("不输出 StateCheck", protocol)
+        self.assertIn("0. 开局：", protocol)
+        for index, name in enumerate(("世界", "人物", "物品", "地点", "事件"), 1):
+            self.assertIn(f"{index}. {name}:", protocol)
         self.assertTrue(by_comment["[initvar]"]["disable"])
         self.assertIn("已初始化: false", by_comment["[initvar]"]["content"])
         for entry in entries:

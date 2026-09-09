@@ -20,6 +20,7 @@
   let mvu = null;
   let timer = null;
   let lastSignature = "";
+  let initializing = false;
 
   function locate(name) {
     const helper = window.TavernHelper || hostWindow.TavernHelper;
@@ -161,6 +162,7 @@
 
   function appendMetricRows(card, values) {
     for (const metric of CONFIG.metrics || []) {
+      if (!Object.prototype.hasOwnProperty.call(values || {}, metric.id)) continue;
       const raw = Number(values?.[metric.id] ?? metric.initial ?? metric.ranges?.[0] ?? 0);
       const minimum = Number(metric.ranges?.[0] ?? 0);
       const maximum = Number(metric.ranges?.[metric.ranges.length - 1] ?? 100);
@@ -236,7 +238,6 @@
       form.append(label, input); inputs.set(field.path, input);
     }
     const error = element('error');
-    const preview = hostDocument.createElement('textarea'); preview.className = 'action'; preview.readOnly = true; preview.rows = 8;
     const snapshot = () => {
       const state = JSON.parse(JSON.stringify(initial));
       for (const field of CONFIG.opening.fields) {
@@ -252,13 +253,13 @@
         const input = inputs.get(field.path);
         [...input.options].forEach((option, i) => { option.disabled = !(field.options[i].when || []).every(test => WorldbookRules.condition(test, state)); });
       }
-      preview.value = ''; error.textContent = '';
+      error.textContent = '';
     };
     form.addEventListener('input', refreshOptions); refreshOptions();
-    const submit = hostDocument.createElement('button'); submit.type = 'submit'; submit.className = 'action'; submit.textContent = '校验并填入开局草稿';
-    form.addEventListener('submit', event => {
+    const submit = hostDocument.createElement('button'); submit.type = 'submit'; submit.className = 'action'; submit.textContent = '创建并保存开局';
+    form.addEventListener('submit', async event => {
       event.preventDefault();
-      if (latestState?.世界?.已初始化) { error.textContent = '当前聊天已初始化'; return; }
+      if (initializing) return;
       const state = snapshot();
       const errors = WorldbookRules.validate(state, CONFIG.collections, CONFIG.metrics);
       for (const field of CONFIG.opening.fields) {
@@ -266,12 +267,39 @@
         if (input.required && !input.value.trim()) errors.push(`${field.label}: 必填`);
         if (field.type === 'select' && (!input.selectedOptions.length || input.selectedOptions[0].disabled)) errors.push(`${field.label}: 选项不满足条件`);
       }
+      errors.push(...WorldbookRules.transition(state, state, {constraints:CONFIG.rules.constraints || []}).errors);
       if (errors.length) { error.textContent = errors.join('\n'); return; }
-      const draft = '请基于以下完整开局快照开始叙事，并按初始化协议写入 stat_data；不要创建常驻世界书条目。\n' + JSON.stringify(state, null, 2);
-      preview.value = draft;
-      try { stageDraft(draft); error.textContent = '已填入草稿，发送后才开始。'; } catch (err) { error.textContent = String(err.message); }
+      initializing = true; submit.disabled = true;
+      try {
+        if (typeof mvu?.replaceMvuData !== 'function') throw Error('MVU 保存接口不可用，开局未提交');
+        const getLastMessageId = locate('getLastMessageId');
+        const tavern = window.SillyTavern || hostWindow.SillyTavern;
+        if (typeof getLastMessageId !== 'function' || typeof tavern?.getCurrentChatId !== 'function') throw Error('无法确认当前聊天，开局未提交');
+        const chatId = tavern.getCurrentChatId();
+        const messageId = Number(getLastMessageId());
+        if (!chatId || messageId !== 0) throw Error('请在只有开场消息的新聊天中创建开局');
+        const target = {type:'message', message_id:messageId};
+        const current = mvu.getMvuData(target) || {};
+        if (current.stat_data?.世界?.已初始化) throw Error('当前聊天已初始化，请新建聊天');
+        state.世界.已初始化 = true;
+        state.世界.回合 = 0;
+        const variables = JSON.parse(JSON.stringify(current));
+        variables.stat_data = state;
+        // replaceMvuData writes the complete validated snapshot; no model request is involved.
+        delete variables.display_data; delete variables.delta_data;
+        await mvu.replaceMvuData(variables, target);
+        if (!active || tavern.getCurrentChatId() !== chatId) throw Error('聊天已切换，请返回原聊天核对开局');
+        const saved = mvu.getMvuData(target);
+        if (JSON.stringify(saved?.stat_data) !== JSON.stringify(state)) throw Error('开局回读与提交内容不一致，请检查 MVU 保存结果');
+        const draft = '开始故事，请从当前已保存的主角与场景展开第一轮互动。';
+        try { stageDraft(draft); } catch { /* Keep an existing draft; state is already saved. */ }
+        refresh(true);
+        meta.textContent = '开局已保存并回读确认，回合 0；发送行动开始故事。';
+      } catch (err) {
+        error.textContent = String(err.message || err);
+      } finally { initializing = false; submit.disabled = false; }
     });
-    form.append(submit, error, preview); content.append(form);
+    form.append(submit, error); content.append(form);
   }
 
   function renderRules() {
@@ -344,17 +372,61 @@
     latestState = variables?.stat_data || {};
     renderTabs();
     renderCollection();
-    meta.textContent = `楼层 ${messageId} · ${new Date().toLocaleTimeString()}`;
+    meta.textContent = `${latestState.世界?.已初始化 ? "已初始化" : "待初始化：请在创建开局中保存资料"} · 状态楼层 ${messageId} · ${new Date().toLocaleTimeString()}`;
+  }
+
+  function outputStatus() {
+    const readMessages = locate('getChatMessages');
+    if (typeof readMessages !== 'function') return '';
+    try {
+      const message = readMessages(-1)?.[0];
+      if (!message || message.role !== 'assistant' || message.message_id === 0) return '';
+      const text = message.message || '';
+      const update = text.match(/<UpdateVariable>([\s\S]*?)<\/UpdateVariable>/i);
+      if (!update) return '最新回复尚无完整 UpdateVariable；生成结束后仍出现此提示，请重新生成该回复。';
+      const patch = update[1].match(/<JSONPatch>([\s\S]*?)<\/JSONPatch>/i);
+      try { if (!patch || !Array.isArray(JSON.parse(patch[1]))) throw Error(); }
+      catch { return '最新回复的 JSONPatch 尚不是合法数组；请修正或重新生成。'; }
+      const saved = mvu.getMvuData({type:'message', message_id:message.message_id});
+      if (!saved?.stat_data?.世界?.已初始化) return '最新回复尚未保存已初始化状态，请检查 MVU 解析结果。';
+      if (!/<StateCheck>[\s\S]*?<\/StateCheck>/i.test(text)) return '最新回复缺少 StateCheck 前检块。';
+      return '';
+    } catch { return '无法读取最新回复的协议状态。'; }
+  }
+
+  function renderMessageUpdates() {
+    const read = locate('getChatMessages');
+    if (typeof read !== 'function') return;
+    for (const target of hostDocument.querySelectorAll('.mes .mvu-update-details')) {
+      const id = Number(target.closest('.mes').getAttribute('mesid'));
+      if (!Number.isInteger(id)) continue;
+      try {
+        const text = read(id)?.[0]?.message || '';
+        const block = text.match(/<UpdateVariable>([\s\S]*?)<\/UpdateVariable>/i)?.[1];
+        if (!block || target.__mvuSource === block) continue;
+        target.__mvuSource = block;
+        const analysis = block.match(/<Analy(?:sis|ze)>([\s\S]*?)<\/Analy(?:sis|ze)>/i)?.[1]?.trim() || '';
+        const raw = block.match(/<JSONPatch>([\s\S]*?)<\/JSONPatch>/i)?.[1] || '';
+        const pre = hostDocument.createElement('pre');
+        pre.style.whiteSpace = 'pre-wrap'; pre.style.overflowWrap = 'anywhere';
+        try { pre.textContent = analysis + '\n' + JSON.stringify(JSON.parse(raw), null, 2); }
+        catch { pre.textContent = '更新数组解析失败\n' + raw; }
+        target.replaceChildren(pre);
+      } catch { target.textContent = '无法读取本楼层更新记录'; }
+    }
   }
 
   function refresh(force = false) {
     if (!active || !mvu) return;
+    renderMessageUpdates();
     const snapshot = latestSnapshot();
+    const status = outputStatus();
     let signature;
-    try { signature = JSON.stringify([snapshot.variables?.stat_data || {}, hostWindow.__worldbookRulesRuntime?.errors]); } catch { signature = String(Date.now()); }
+    try { signature = JSON.stringify([snapshot.messageId, snapshot.variables?.stat_data || {}, hostWindow.__worldbookRulesRuntime?.errors, status]); } catch { signature = String(Date.now()); }
     if (!force && signature === lastSignature) return;
     lastSignature = signature;
     render(snapshot.variables, snapshot.messageId);
+    if (status) meta.textContent = status + " · " + meta.textContent;
   }
 
   launcher.addEventListener("click", () => setOpen(!shell.classList.contains("open")));

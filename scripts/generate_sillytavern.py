@@ -94,6 +94,16 @@ class SillyTavernGenerator:
         self._validate_state_model()
         self._build_initial_state()
         self._validate_features()
+        update_rules = self.mvu_config.get("update_rules", [])
+        if not isinstance(update_rules, list):
+            raise ValueError("mvu.update_rules must be a list")
+        for rule in update_rules:
+            if not isinstance(rule, dict):
+                raise ValueError("mvu.update_rules entries must be mappings")
+            self._field_at_path(rule.get("path"))
+            for key in ("when", "update"):
+                if not isinstance(rule.get(key), str) or not rule[key].strip():
+                    raise ValueError(f"mvu.update_rules requires nonempty {key}")
 
     def _field_at_path(self, path):
         if not isinstance(path, str) or not path.startswith('/'):
@@ -237,7 +247,7 @@ class SillyTavernGenerator:
             )
 
         required_fields = {
-            '世界': {'已初始化', '回合', '当前地点'},
+            '世界': {'已初始化', '回合'},
             '人物': {'所在地点', '数值'},
             '物品': {'持有者', '所在地点'},
             '地点': {'已发现', '状态'},
@@ -286,6 +296,9 @@ class SillyTavernGenerator:
         seen_ids = set()
         seen_names = set()
         for index, metric in enumerate(self.metrics):
+            excluded = metric.get("exclude_entities", [])
+            if not isinstance(excluded, list) or any(not isinstance(key, str) or not key for key in excluded):
+                raise ValueError("metric.exclude_entities must be a list of entity keys")
             dim_id = str(metric.get('id', '')).strip()
             name = str(metric.get('name', '')).strip()
             ranges = metric.get('ranges', [])
@@ -747,17 +760,19 @@ class SillyTavernGenerator:
             f"Unknown character metric id {normalized!r}; use an id declared in config.yaml"
         )
 
-    def _normalize_metrics(self, raw_value: Any, context: str) -> Dict[str, Any]:
+    def _normalize_metrics(self, raw_value: Any, context: str, entity_name=None) -> Dict[str, Any]:
         if raw_value is None:
             raw_value = {}
         if not isinstance(raw_value, dict):
             raise ValueError(f"{context} must be a mapping")
         metrics = {
             metric['id']: metric.get('initial', metric['ranges'][0])
-            for metric in self.metrics
+            for metric in self.metrics if entity_name not in metric.get('exclude_entities', [])
         }
         for raw_key, raw_number in raw_value.items():
             metric = self._metric_by_id(raw_key)
+            if entity_name in metric.get("exclude_entities", []):
+                raise ValueError(f"{context}.{raw_key} does not apply to {entity_name}")
             try:
                 value = float(raw_number)
             except (TypeError, ValueError) as exc:
@@ -820,6 +835,7 @@ class SillyTavernGenerator:
         raw_record: Any,
         collection: Dict[str, Any],
         context: str,
+        entity_name=None,
     ) -> Dict[str, Any]:
         if raw_record is None:
             raw_record = {}
@@ -830,7 +846,8 @@ class SillyTavernGenerator:
         if unknown:
             raise ValueError(f"{context} contains unknown fields: {', '.join(map(str, unknown))}")
         return {
-            field_name: self._normalize_field_value(
+            field_name: self._normalize_metrics(raw_record.get(field_name, {}), f"{context}.{field_name}", entity_name)
+            if field["type"] == "metrics" else self._normalize_field_value(
                 field,
                 raw_record.get(field_name, deepcopy(field.get('default'))),
                 f"{context}.{field_name}",
@@ -868,6 +885,7 @@ class SillyTavernGenerator:
                     entity_value,
                     collection,
                     f"{context}.{entity_name}",
+                    entity_name=str(entity_name) if path == "人物" else None,
                 )
                 for entity_name, entity_value in raw_collection.items()
             }
@@ -977,17 +995,12 @@ class SillyTavernGenerator:
     def _build_opening_rules(self) -> str:
         return f"""---
 开局创建规则:
-  - 首先读取 /世界/已初始化。true 表示开局已由场景快照创建，禁止重置任何集合。
-  - 仅当其为 false 时，才根据用户的自定义开局在本轮末尾创建完整快照。
-  - 自定义开局必须至少确定：场景、时间、当前地点、在场人物；未提及的物品/地点/事件保持空集合。
-  - 如果这四项仍有缺失，正文只向用户询问缺失项，本轮 <JSONPatch> 输出 []，不擅自创建开局。
-  - 只创建已经出现或开局必需的实体，不为填满面板而虚构数据。
-  - 初始人物数值使用下方定义的 initial，除非开局明确给出了不同关系阶段。
-  - 创建时使用五个 replace，分别完整替换 /世界、/人物、/物品、/地点、/事件；实体对象必须包含所有 Schema 字段。
-  - 快照写入后必须将 /世界/已初始化 设为 true。
+  - 开局资料由创建开局表单校验并写入当前会话，预设开场由生成器提供快照；两者都在剧情生成前完成初始化。
+  - 读取 <status_current_variables> 中的 /世界/已初始化。false 时请用户在面板中完成建角，不推进剧情。
+  - true 时依据已有主角与场景推进正文。开局已保存的身份、地点和资源直接从当前变量读取。
+  - 首次剧情与后续剧情均先完成正文前检，再展开故事。
+  - 模型输出的是待校验补丁文本，MVU 脚本负责解析、校验和保存。初始化与存储成功由程序确认，正文只叙述世界内发生的事。
 
-变量结构:
-{self._build_state_schema_summary()}
 """
 
     def _build_preflight_rules(self) -> str:
@@ -998,11 +1011,11 @@ class SillyTavernGenerator:
         )
         return f"""---
 正文前一致性检查:
-  - 每次回复必须先读取 <status_current_variables>，然后输出一个不超过 {max_words} 字的 <StateCheck>。
-  - 这是一次模型回复内的紧凑审查，不是多个角色、多个 Agent 或额外 API 调用。
+  - 生成故事正文前，先读取 <status_current_variables>，用 <StateCheck> 标签包裹不超过 {max_words} 字的裁决结果，再写正文。
   - 依次应用下列审查职责，但只报告与本轮有关的约束和违规，不逐项展示思维过程：
 {check_lines}
   - 变量与较早的聊天叙述冲突时，以变量为准；不得从历史重新累计。
+  - StateCheck 使用紧凑 JSON，字段为 scene、constraints、violations、verdict、focus。
   - violations 只列实际问题；每项包含 type、issue、handling。没有问题时写空数组。
   - verdict 只能是 proceed、constrain、reframe、reject；reject 仅用于无法转化为世界内尝试或触犯内容边界的请求。
   - 检查块只写可观察的裁决结果，不写隐藏思维链，不修改变量，不预先宣布尚未发生的剧情结果。
@@ -1023,7 +1036,7 @@ class SillyTavernGenerator:
                 f"范围 {metric['ranges'][0]}~{metric['ranges'][-1]}；"
                 f"初始 {metric.get('initial', metric['ranges'][0])}；"
                 f"轻微 ±{minor[0]}~{minor[-1]}，重大 ±{major[0]}~{major[-1]}；"
-                f"{metric.get('description', '按剧情中的明确行为变化')}"
+                f"{metric.get('description', '按剧情中的明确行为变化')}；不适用实体键：{metric.get('exclude_entities', [])}"
             )
 
         return f"""---
@@ -1041,17 +1054,17 @@ class SillyTavernGenerator:
   - 同时最多维持 {max_active_events} 个“进行中”事件；这是上限，不是必须填满的配额。
   - 只有时间流逝、参与者行动或明确因果使事件前进时才更新；不得为刷新状态栏而强制推进。
   - 若 Schema 定义了“阶段”枚举，按枚举声明顺序逐级推进，禁止无依据跳级。
-  - 事件收束时先更新状态与结果，并把永久后果落实到世界、人物、物品或地点；结果被正文确认后的下一剧情回合移除事件，避免活动列表无限增长。
+  - 事件收束时先更新状态与结果，并把永久后果落实到世界、人物、物品或地点；配置 archives 时由脚本在后续时间推进中归档并移除终结事件；未配置归档时，在保存长期后果后移除事件。
 
   更新原则:
-  - 先写完正文，再根据本轮已经发生的事实输出一个 <UpdateVariable>。
+  - 根据已经完成的本轮正文，提取已发生的持久变化。
   - <StateCheck> 约束的是“允许如何叙述”；<UpdateVariable> 只记录正文最终确认的结果。用户请求但正文未发生、被 constrain/reframe 改写或失败的预期结果不得直接写入变量。
-  - 剧情回复对 /世界/回合 使用 delta +1；纯 OOC/配置说明不增加回合。
-  - 每轮最多更新 {max_characters} 个人物、总计 {max_entities} 个实体；只更新本轮直接变化的实体。
+  - 每次剧情回复对 /世界/回合 使用 delta +1；纯 OOC/配置说明不增加回合。
+  - 已初始化后的每轮最多更新 {max_characters} 个人物、总计 {max_entities} 个实体；只更新本轮直接变化的实体。
   - 把更新视为最小事实提交批次：先筛选会影响后续叙事的持久变化，再选择最少操作；不得把描写性细节、计划、推测或未完成动作写入状态。
   - replace 用于已存在字段的新值；delta 用于可证明的数值增减；insert 用于新实体且一次写入完整对象；remove 用于已消耗或按保留策略退出的实体；move 只用于真实改名或键迁移。
   - 同一事实涉及多个权威字段时必须放在同一提交批次，例如物品有持有者时清空其所在地点，人物跨入或离开当前场景时同步其所在地点与在场状态。
-  - 已消耗物品、已收束事件和离场后不再影响后续的一次性人物应 remove；有持续关系、目标或后果的人物不得仅因暂时离场而删除。
+  - 已消耗物品和离场后不再影响后续的一次性人物应 remove；事件按上述归档规则处理；有持续关系、目标或后果的人物不得仅因暂时离场而删除。
   - 数值变化优先使用 delta；无变化时不输出 replace 或 delta 0。
   - 人物普通互动使用轻微变化；不可逆选择、关系转折、重大创伤或成就才使用重大变化。
   - 只被提及、背景中存在、重复已有态度或模型自己推测的状态不更新。
@@ -1060,32 +1073,32 @@ class SillyTavernGenerator:
 
     def _build_mvu_output_format(self) -> str:
         analysis_words = int(self.mvu_config.get('update_analysis_max_words', 120))
+        checklist = '\n'.join(
+            f"    {i}. {collection['path']}: 检查该集合各字段的更新条件；记录已确认变化，未变化写无变化。"
+            for i, collection in enumerate(self.collections.values(), 1)
+        )
         return f"""---
 MVU 每轮输出格式:
   rule:
-  - 严格顺序：<StateCheck> → 正文 → <UpdateVariable>。三者共用同一次模型回复。
-  - <StateCheck> 使用紧凑 JSON，只包含 scene、constraints、violations、verdict、focus。
-  - <Analysis> 最多 {analysis_words} 字，只列本轮实际变化的路径和原因；无变化写“无变量变化”。
-  - <JSONPatch> 必须是合法 JSON 数组。无变化时输出 []。
-  - path 必须以 / 开头，并与 <status_current_variables> 中的集合名、实体名、字段名完全一致。
+  - 更新分析与实际更新命令一并放在回复末尾。
+  - 分析最多 {analysis_words} 字，按下列集合逐项给出简短变化结论；未变化也须说明，不省略集合，不展开思维过程。
+  - 更新命令为合法 JSON 数组，按字段更新规则选择 replace、delta、insert、remove、move；无变化的字段不生成操作。
+  - path 必须以 / 开头，使用当前变量中的实体键和 Schema 字段；新实体一次 insert 完整对象。
   - replace、delta、insert 使用 op/path/value；remove 使用 op/path；move 使用 op/from/to。
-  - 这些是 MVU 支持的 JSON Patch 风格操作；禁止更新以下划线开头的只读字段。
+  - 禁止更新以下划线开头的只读字段；数值遵循已定义边界。
+  - 开局由脚本保存，首次剧情与后续剧情都从已有快照计算增量，不重新初始化五集合。
+  - 剧情推进时回合 delta +1；没有剧情推进和状态变化时输出空数组。
   format: |-
-    <StateCheck>
-    {{"scene":"当前场景","constraints":["本轮有效约束"],"violations":[],"verdict":"proceed","focus":"本轮焦点"}}
-    </StateCheck>
-
-    ${{正文}}
-
     <UpdateVariable>
-    <Analysis>${{本轮实际变化，简洁说明}}</Analysis>
+    <Analysis>
+    0. 开局：确认已保存快照，不重复初始化。
+{checklist}
+    </Analysis>
     <JSONPatch>
-    [
-      {{ "op": "delta", "path": "/世界/回合", "value": 1 }},
-      {{ "op": "replace", "path": "/人物/角色名/所在地点", "value": "新地点" }}
-    ]
+    []
     </JSONPatch>
     </UpdateVariable>
+  示例说明: 上面的空数组是无变化示例；有变化时填入实际操作，例如推进一轮使用 {{"op":"delta","path":"/世界/回合","value":1}}。
 """
 
     def _build_mvu_init_data(self) -> str:
@@ -1117,7 +1130,8 @@ MVU 每轮输出格式:
             "selectiveLogic": defaults.get('selective_logic', 0),
             "addMemo": defaults.get('add_memo', True),
             "order": order,
-            "position": 0,
+            "position": 0 if disabled else 4,
+            "role": 0,
             "disable": disabled,
             "probability": 100,
             "useProbability": True,
@@ -1133,35 +1147,24 @@ MVU 每轮输出格式:
         }
 
     def generate_mvu_entries(self, start_id: int) -> List[Dict[str, Any]]:
-        protocol = "\n\n".join([
-            self._build_opening_rules(),
-            self._build_preflight_rules(),
+        plot = "\n\n".join([self._build_opening_rules(), self._build_preflight_rules()])
+        update = "\n\n".join([
+            '变量结构：\n' + self._build_state_schema_summary(),
             self._build_mvu_update_rules(),
-            self._build_mvu_output_format(),
-            '本作可执行状态规则（只约束结果，不代表事实已发生）：\n' + json.dumps(self.config.get('runtime_rules') or {}, ensure_ascii=False),
+            '变量更新条件：\n' + '\n'.join(f"{rule['path']}:\n  check:\n    - {rule['when']}\n    - {rule['update']}" for rule in self.mvu_config.get('update_rules', [])),
+            '本作可执行状态规则：\n' + json.dumps(self.config.get('runtime_rules') or {}, ensure_ascii=False),
         ])
         return [
+            self._make_system_entry(start_id, "合理性审查与开局", plot, 900),
+            self._make_system_entry(start_id + 1, "[mvu_update]变量更新", update, 902),
             self._make_system_entry(
-                start_id,
-                "[mvu_protocol]生命周期协议",
-                protocol,
-                900,
-            ),
-            self._make_system_entry(
-                start_id + 1,
-                "[mvu_current]变量列表",
+                start_id + 2, "[mvu_current]变量列表",
                 "---\n<status_current_variables>\n"
                 "{{format_message_variable::stat_data}}\n"
-                "</status_current_variables>",
-                901,
+                "</status_current_variables>", 901,
             ),
-            self._make_system_entry(
-                start_id + 2,
-                "[initvar]",
-                self._build_mvu_init_data(),
-                902,
-                disabled=True,
-            ),
+            self._make_system_entry(start_id + 3, "[mvu_update]变量输出格式", self._build_mvu_output_format(), 903),
+            self._make_system_entry(start_id + 4, "[initvar]", self._build_mvu_init_data(), 904, disabled=True),
         ]
 
     def _build_zod_script(self) -> str:
@@ -1175,6 +1178,8 @@ MVU 每轮输出格式:
                 f"transform(value => Math.min({json.dumps(maximum)}, Math.max({json.dumps(minimum)}, "
                 f"Number.isFinite(value) ? value : {json.dumps(initial)}))).prefault({json.dumps(initial)})"
             )
+            if metric.get("exclude_entities"):
+                metric_fields[-1] = metric_fields[-1].rsplit(".prefault(", 1)[0] + ".optional()"
 
         def field_expression(field: Dict[str, Any]) -> str:
             field_type = field['type']
@@ -1225,9 +1230,11 @@ MVU 每轮输出格式:
             if collection['kind'] == 'singleton':
                 root_fields.append(f"  {path}: {schema_name}.prefault({{}})")
             else:
-                root_fields.append(
-                    f"  {path}: z.record(z.string(), {schema_name}).prefault({{}})"
-                )
+                expression = f"z.record(z.string(), {schema_name}).prefault({{}})"
+                if collection['path'] == '人物' and any(m.get('exclude_entities') for m in self.metrics):
+                    scopes = json.dumps([{ 'id': m['id'], 'exclude_entities': m.get('exclude_entities', [])} for m in self.metrics], ensure_ascii=False)
+                    expression += f".superRefine((records, ctx) => {{ for (const [name, record] of Object.entries(records)) for (const metric of {scopes}) {{ const has = Object.prototype.hasOwnProperty.call(record.数值, metric.id); if (has === metric.exclude_entities.includes(name)) ctx.addIssue({{code:'custom', path:[name,'数值',metric.id], message:'metric does not match entity scope'}}); }} }})"
+                root_fields.append(f"  {path}: {expression}")
 
         joined_metric_fields = ',\n'.join(metric_fields)
         joined_schema_blocks = '\n'.join(schema_blocks)
@@ -1282,7 +1289,7 @@ $(() => registerMvuSchema(Schema));
             "rules": self.config.get('runtime_rules') or {},
             "opening": {
                 **(self.config.get('opening') or {}),
-                'state': self._build_initial_state({'state': (self.config.get('opening') or {}).get('state', {})}, Path('custom')),
+                'state': self._build_initial_state({'state': (self.config.get('opening') or {}).get('state', {})}),
             } if self.config.get('opening') else {},
             "collections": [
                 {
@@ -1299,6 +1306,7 @@ $(() => registerMvuSchema(Schema));
                     "id": metric['id'],
                     "name": metric['name'],
                     "initial": metric.get('initial', metric['ranges'][0]),
+                    "exclude_entities": metric.get("exclude_entities", []),
                     "ranges": metric['ranges'],
                     "stages": metric['stages'],
                 }
@@ -1369,7 +1377,7 @@ $(() => registerMvuSchema(Schema));
         }
 
     def build_mvu_regexes(self) -> List[Dict[str, Any]]:
-        return [
+        records = [
             self._regex_record(
                 "[MVU]隐藏生成中的内部块",
                 r"/<(StateCheck|UpdateVariable)>(?![\s\S]*<\/\1>)[\s\S]*$/gi",
@@ -1378,7 +1386,7 @@ $(() => registerMvuSchema(Schema));
             ),
             self._regex_record(
                 "[MVU]隐藏完整内部块",
-                r"/<(StateCheck|UpdateVariable)>[\s\S]*?<\/\1>/gi",
+                r"/<StateCheck>[\s\S]*?<\/StateCheck>/gi",
                 markdown_only=True,
                 prompt_only=False,
             ),
@@ -1389,6 +1397,10 @@ $(() => registerMvuSchema(Schema));
                 prompt_only=True,
             ),
         ]
+        display = self._regex_record("[MVU]楼层更新记录", r"/<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gi", True, False)
+        display['replaceString'] = '<details class="mvu-update-record"><summary>变量更新记录（保存结果见状态面板）</summary><div class="mvu-update-details">等待面板读取更新内容</div></details>'
+        records.append(display)
+        return records
 
     def generate_narrator_card(self, lorebook=None) -> Dict[str, Any]:
         project = self.config.get('project', {})
@@ -1396,7 +1408,7 @@ $(() => registerMvuSchema(Schema));
         defaults = self.silly_defaults.get('narrator', {})
 
         scenarios = self.load_scenarios()
-        first_mes = scenarios[0]['body'] if scenarios else ('请通过悬浮状态栏的“创建开局”填写起点，或直接描述希望的开局条件。' if self.config.get('opening') else '请描述你的身份、起点与希望的开局条件。')
+        first_mes = scenarios[0]['body'] if scenarios else ('请通过悬浮状态栏的“创建开局”填写资料并保存，再发送行动开始故事。' if self.config.get('opening') else '本作品尚无预设开局或建角表单，请先配置开局后生成。')
         alternate_greetings = [s['body'] for s in scenarios[1:]] if len(scenarios) > 1 else []
 
         metric_names = [metric['name'] for metric in self.metrics]
@@ -1421,7 +1433,7 @@ $(() => registerMvuSchema(Schema));
             "character_version": project.get('version', '1.0.0'),
             "extensions": {
                 "created_at": datetime.now().isoformat(),
-                "world_book": f"{project.get('name', '作品')}世界书",
+                "world": f"{project.get('name', '作品')}世界书",
                 "regex_scripts": self.build_mvu_regexes(),
                 "tavern_helper": self.build_tavern_helper_extension(),
             }
